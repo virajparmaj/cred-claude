@@ -1,0 +1,25 @@
+{
+  "updated_at": "2026-03-20",
+  "source": "https://www.anthropic.com/pricing",
+  "note": "Per million tokens, USD. Verify at source URL. These are best-effort values.",
+  "rates": {
+    "opus": {
+      "input": 15.0,
+      "output": 75.0,
+      "cache_read": 1.50,
+      "cache_create": 18.75
+    },
+    "sonnet": {
+      "input": 3.0,
+      "output": 15.0,
+      "cache_read": 0.30,
+      "cache_create": 3.75
+    },
+    "haiku": {
+      "input": 1.0,
+      "output": 5.0,
+      "cache_read": 0.10,
+      "cache_create": 1.25
+    }
+  }
+}

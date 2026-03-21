@@ -1,0 +1,466 @@
+"""Limit providers — fetch session usage from the Claude OAuth API or estimate it."""
+
+from __future__ import annotations
+
+import datetime
+import json
+import logging
+import subprocess
+import urllib.error
+import urllib.request
+from abc import ABC, abstractmethod
+
+from credclaude.config import SNAPSHOT_PATH
+from credclaude.models import Confidence, LimitInfo, ProviderState, WindowInfo
+
+logger = logging.getLogger("credclaude.limit_providers")
+
+# ---------------------------------------------------------------------------
+# Plan tier budget estimates (community-derived, NOT official)
+# ---------------------------------------------------------------------------
+PLAN_ESTIMATES: dict[str, dict] = {
+    "pro": {
+        "daily_budget_usd": 15.0,
+        "confidence": Confidence.LOW,
+        "note": "Community estimate — Anthropic does not publish exact USD limits",
+    },
+    "max_5x": {
+        "daily_budget_usd": 75.0,
+        "confidence": Confidence.LOW,
+        "note": "Community estimate — approximately 5x Pro",
+    },
+    "max_20x": {
+        "daily_budget_usd": 150.0,
+        "confidence": Confidence.LOW,
+        "note": "Community estimate — approximately 20x Pro",
+    },
+}
+
+_OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
+_OAUTH_BETA = "oauth-2025-04-20"
+_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+
+def _now() -> datetime.datetime:
+    """Return current timezone-aware datetime (consistent across all providers)."""
+    return datetime.datetime.now().astimezone()
+
+
+# ---------------------------------------------------------------------------
+# Utilization normalization
+# ---------------------------------------------------------------------------
+def _normalize_utilization(value: float) -> float:
+    """Normalize utilization to 0..100 range.
+
+    The Claude OAuth API returns utilization as a fraction (0.0–1.0).
+    The <= 1.0 threshold handles this correctly: values in [0.0, 1.0] are
+    multiplied by 100 to become percentages. Values > 1.0 pass through
+    as-is (future-proofing for a potential API format change to percents).
+
+    Edge case: API value 1.0 → interpreted as 100%, not 1%. This matches
+    the API's documented behavior (fraction format).
+
+    Result is clamped to [0, 100] and rounded to 1 decimal.
+    """
+    if value <= 1.0:
+        value = value * 100
+    return max(0.0, min(100.0, round(value, 1)))
+
+
+# ---------------------------------------------------------------------------
+# Disk snapshot — persists last successful usage across app restarts
+# ---------------------------------------------------------------------------
+def _save_snapshot(info: LimitInfo) -> None:
+    """Persist last successful usage to disk."""
+    try:
+        data = {
+            "utilization_pct": info.utilization_pct,
+            "resets_at": info.resets_at.isoformat() if info.resets_at else None,
+            "last_sync": info.last_sync.isoformat() if info.last_sync else None,
+            "source": info.source,
+            "saved_at": _now().isoformat(),
+        }
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SNAPSHOT_PATH.write_text(json.dumps(data))
+    except Exception as e:
+        logger.debug("Failed to save snapshot: %s", e)
+
+
+def _load_snapshot() -> LimitInfo | None:
+    """Load last successful usage from disk. Returns None on any error."""
+    try:
+        data = json.loads(SNAPSHOT_PATH.read_text())
+        resets_at = None
+        if data.get("resets_at"):
+            resets_at = datetime.datetime.fromisoformat(data["resets_at"])
+        last_sync = None
+        if data.get("last_sync"):
+            last_sync = datetime.datetime.fromisoformat(data["last_sync"])
+        # Discard snapshot if its 5-hour window has already reset
+        if resets_at and resets_at < _now():
+            logger.debug("Snapshot expired (resets_at in past), discarding")
+            return None
+        return LimitInfo(
+            source=data.get("source", "official"),
+            utilization_pct=data.get("utilization_pct"),
+            resets_at=resets_at,
+            last_sync=last_sync,
+            state=ProviderState.HEALTHY,
+            confidence=Confidence.HIGH,
+        )
+    except Exception as e:
+        logger.debug("Failed to load snapshot: %s", e)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Abstract base
+# ---------------------------------------------------------------------------
+class LimitProvider(ABC):
+    """Interface for account limit data sources."""
+
+    @abstractmethod
+    def get_limit_info(self) -> LimitInfo:
+        """Return current limit information."""
+        ...
+
+    @abstractmethod
+    def get_state(self) -> ProviderState:
+        """Return provider health state."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Official provider (OAuth API — same source as claude.ai)
+# ---------------------------------------------------------------------------
+class OfficialLimitProvider(LimitProvider):
+    """Fetches real session usage from the Claude OAuth API.
+
+    Uses the same data source as the claude.ai "Plan usage limits" page.
+    Token is read from macOS Keychain (set by Claude Code on login).
+
+    Polls every 60 seconds. On any failure (429, network, etc.), silently
+    returns last known data as HEALTHY — no backoff, no stale markers.
+    """
+
+    CACHE_TTL_SEC = 55  # Just under 60s poll interval
+
+    def __init__(self) -> None:
+        self._cached: LimitInfo | None = None
+        self._cache_time: datetime.datetime | None = None
+
+    # ------------------------------------------------------------------
+    # Token extraction
+    # ------------------------------------------------------------------
+    def _get_token(self) -> str:
+        """Extract OAuth access token from macOS Keychain."""
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Keychain lookup failed (exit {result.returncode}): {result.stderr.strip()}"
+            )
+        raw = result.stdout.strip()
+        try:
+            # Token is stored as JSON: {"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}
+            data = json.loads(raw)
+            return data["claudeAiOauth"]["accessToken"]
+        except (json.JSONDecodeError, KeyError):
+            # Might already be a raw token (future-proofing)
+            if raw.startswith("sk-"):
+                return raw
+            raise RuntimeError(f"Unexpected Keychain credential format: {raw[:40]}...")
+
+    # ------------------------------------------------------------------
+    # API call
+    # ------------------------------------------------------------------
+    def _fetch_usage(self, token: str) -> dict:
+        """Call the OAuth usage endpoint and return the JSON response."""
+        req = urllib.request.Request(
+            _OAUTH_URL,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": _OAUTH_BETA,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                raise _RateLimitError()
+            if e.code == 401:
+                try:
+                    body = json.loads(e.read().decode())
+                    err_msg = body.get("error", {}).get("message", "Unauthorized")
+                except Exception:
+                    err_msg = "Unauthorized"
+                raise _TokenExpiredError(err_msg)
+            raise RuntimeError(f"API error {e.code}: {e.reason}")
+
+    # ------------------------------------------------------------------
+    # Cache management
+    # ------------------------------------------------------------------
+    def _cache_valid(self) -> bool:
+        if self._cached is None or self._cache_time is None:
+            return False
+        age = (_now() - self._cache_time).total_seconds()
+        return age < self.CACHE_TTL_SEC
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
+    def get_state(self) -> ProviderState:
+        if self._cached is not None:
+            return ProviderState.HEALTHY
+        return ProviderState.OFFLINE
+
+    def try_snapshot_startup(self) -> bool:
+        """Try to seed cache from disk snapshot on startup.
+
+        Returns True if a fresh snapshot was loaded (saved <10 min ago,
+        resets_at still in future). This avoids an API call on startup.
+        """
+        try:
+            data = json.loads(SNAPSHOT_PATH.read_text())
+            saved_at_str = data.get("saved_at")
+            resets_at_str = data.get("resets_at")
+            if not saved_at_str or not resets_at_str:
+                return False
+
+            saved_at = datetime.datetime.fromisoformat(saved_at_str)
+            resets_at = datetime.datetime.fromisoformat(resets_at_str)
+            now = _now()
+
+            # Snapshot must be recent (<10 min) and not expired
+            age_minutes = (now - saved_at).total_seconds() / 60
+            if age_minutes > 10 or resets_at < now:
+                logger.debug("Snapshot too old (%.1f min) or expired, skipping", age_minutes)
+                return False
+
+            last_sync = None
+            if data.get("last_sync"):
+                last_sync = datetime.datetime.fromisoformat(data["last_sync"])
+
+            info = LimitInfo(
+                source=data.get("source", "official"),
+                utilization_pct=data.get("utilization_pct"),
+                resets_at=resets_at,
+                last_sync=last_sync,
+                state=ProviderState.HEALTHY,
+                confidence=Confidence.HIGH,
+            )
+            self._cached = info
+            self._cache_time = now
+            logger.info("Startup: loaded snapshot (%.1f%% used, saved %.0f min ago)",
+                        info.utilization_pct or 0, age_minutes)
+            return True
+        except Exception as e:
+            logger.debug("Snapshot startup failed: %s", e)
+            return False
+
+    def force_refresh(self) -> LimitInfo:
+        """Clear cache and re-fetch."""
+        self._cache_time = None
+        self._cached = None
+        logger.info("Force refresh: cleared cache")
+        return self.get_limit_info()
+
+    def get_limit_info(self) -> LimitInfo:
+        # Return cached data if still fresh
+        if self._cache_valid() and self._cached is not None:
+            return self._cached
+
+        try:
+            token = self._get_token()
+            data = self._fetch_usage(token)
+
+            five_hour = data.get("five_hour", {})
+            utilization = five_hour.get("utilization")  # fraction or percent
+            resets_at_str = five_hour.get("resets_at")
+
+            if utilization is None:
+                raise RuntimeError(f"Unexpected API response shape: {list(data.keys())}")
+
+            resets_at: datetime.datetime | None = None
+            if resets_at_str:
+                resets_at = datetime.datetime.fromisoformat(
+                    resets_at_str.replace("Z", "+00:00")
+                ).astimezone()
+
+            now = _now()
+            info = LimitInfo(
+                source="official (claude.ai)",
+                plan_tier="unknown",
+                daily_budget_usd=0.0,
+                confidence=Confidence.HIGH,
+                state=ProviderState.HEALTHY,
+                last_sync=now,
+                utilization_pct=_normalize_utilization(utilization),
+                resets_at=resets_at,
+                weekly_cap_note="Weekly cap may apply — check claude.ai for details",
+                error=None,
+            )
+
+            self._cached = info
+            self._cache_time = now
+            _save_snapshot(info)
+            logger.info("OAuth usage fetched: %.1f%% used", info.utilization_pct)
+            return info
+
+        except _RateLimitError:
+            logger.debug("429 rate limited — using last known data")
+            return self._fallback("Rate limited")
+
+        except _TokenExpiredError as e:
+            logger.info("OAuth token expired: %s", e)
+            return self._fallback("Token expired — run: claude auth login")
+
+        except Exception as e:
+            logger.warning("OfficialLimitProvider failed: %s", e)
+            return self._fallback(str(e))
+
+    def _fallback(self, reason: str) -> LimitInfo:
+        """Return last known data as HEALTHY. No stale markers."""
+        # Discard cache if its 5-hour window has already reset
+        if self._cached is not None and self._cached.resets_at and self._cached.resets_at < _now():
+            logger.debug("Cached data expired (resets_at in past), discarding")
+            self._cached = None
+            self._cache_time = None
+        # Return last cached value as HEALTHY
+        if self._cached is not None:
+            return LimitInfo(
+                source=self._cached.source,
+                plan_tier=self._cached.plan_tier,
+                daily_budget_usd=self._cached.daily_budget_usd,
+                confidence=Confidence.HIGH,
+                state=ProviderState.HEALTHY,
+                last_sync=self._cached.last_sync,
+                utilization_pct=self._cached.utilization_pct,
+                resets_at=self._cached.resets_at,
+                weekly_cap_note=self._cached.weekly_cap_note,
+                error=reason,
+            )
+        # Try disk snapshot
+        snapshot = _load_snapshot()
+        if snapshot is not None:
+            snapshot.error = reason
+            return snapshot
+        return LimitInfo(
+            source="official (unavailable)",
+            state=ProviderState.OFFLINE,
+            error=reason,
+        )
+
+
+class _RateLimitError(Exception):
+    """Sentinel for HTTP 429 responses."""
+
+
+class _TokenExpiredError(Exception):
+    """Sentinel for HTTP 401 token-expired responses."""
+
+
+# ---------------------------------------------------------------------------
+# Estimator (fallback when official provider unavailable)
+# ---------------------------------------------------------------------------
+class EstimatorLimitProvider(LimitProvider):
+    """Estimates account limits from user-configured plan tier.
+
+    All values are approximate and clearly labeled as estimates.
+    If user sets daily_budget_usd in config, that takes precedence.
+    """
+
+    def __init__(self, config: dict) -> None:
+        self._config = config
+        self._state = ProviderState.HEALTHY
+        self._last_sync = _now()
+
+    def update_config(self, config: dict) -> None:
+        """Update with fresh config (e.g., after settings change)."""
+        self._config = config
+        self._last_sync = _now()
+
+    def get_state(self) -> ProviderState:
+        plan_tier = self._config.get("plan_tier", "unknown")
+        manual_budget = self._config.get("daily_budget_usd")
+        if manual_budget is not None:
+            return ProviderState.HEALTHY
+        if plan_tier in PLAN_ESTIMATES:
+            return ProviderState.HEALTHY
+        return ProviderState.OFFLINE
+
+    def get_limit_info(self, five_hour_window: WindowInfo | None = None) -> LimitInfo:
+        plan_tier = self._config.get("plan_tier", "unknown")
+        manual_budget = self._config.get("daily_budget_usd")
+
+        if manual_budget is not None:
+            budget = float(manual_budget)
+            confidence = Confidence.MEDIUM
+            source = "estimated (manual budget)"
+        elif plan_tier in PLAN_ESTIMATES:
+            est = PLAN_ESTIMATES[plan_tier]
+            budget = est["daily_budget_usd"]
+            confidence = est["confidence"]
+            source = f"estimated ({plan_tier.replace('_', ' ').title()} plan)"
+        else:
+            budget = 100.0
+            confidence = Confidence.LOW
+            source = "estimated (unknown plan — using $100 default)"
+            logger.warning("Unknown plan tier '%s', defaulting to $100 budget", plan_tier)
+
+        return LimitInfo(
+            source=source,
+            plan_tier=plan_tier,
+            daily_budget_usd=budget,
+            confidence=confidence,
+            state=self.get_state(),
+            last_sync=self._last_sync,
+            five_hour_window=five_hour_window,
+            weekly_cap_note="Weekly cap may apply (not tracked locally)",
+            error=None,
+            utilization_pct=None,   # Cannot estimate without official data
+            resets_at=None,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Composite provider — tries official first, falls back to estimator
+# ---------------------------------------------------------------------------
+class CompositeLimitProvider(LimitProvider):
+    """Orchestrates OfficialLimitProvider (primary) and EstimatorLimitProvider (fallback)."""
+
+    def __init__(self, config: dict) -> None:
+        self._official = OfficialLimitProvider()
+        self._estimator = EstimatorLimitProvider(config)
+
+    def update_config(self, config: dict) -> None:
+        self._estimator.update_config(config)
+
+    def try_snapshot_startup(self) -> bool:
+        """Try to seed official provider cache from disk snapshot."""
+        return self._official.try_snapshot_startup()
+
+    def force_refresh(self) -> LimitInfo:
+        """Clear cache on the official provider and re-fetch."""
+        return self._official.force_refresh()
+
+    def get_state(self) -> ProviderState:
+        official_state = self._official.get_state()
+        if official_state == ProviderState.HEALTHY:
+            return official_state
+        return self._estimator.get_state()
+
+    def get_limit_info(self) -> LimitInfo:
+        official = self._official.get_limit_info()
+        if official.state == ProviderState.HEALTHY and official.utilization_pct is not None:
+            return official
+        # Official unavailable — use estimator but carry through the
+        # official error so the UI can show an actionable message.
+        fallback = self._estimator.get_limit_info()
+        if official.error:
+            fallback.error = official.error
+            fallback.state = official.state
+        return fallback

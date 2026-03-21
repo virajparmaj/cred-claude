@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credclaude"
+dynamic = ["version"]
+description = "Best-effort local macOS menu bar app for tracking Claude Code usage costs"
+requires-python = ">=3.11"
+dependencies = ["rumps>=0.4.0"]
+
+[tool.setuptools.dynamic]
+version = {attr = "credclaude.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["credclaude*"]
+
+[tool.setuptools.package-data]
+credclaude = ["default_pricing.json"]
+
+[project.scripts]
+credclaude = "credclaude.__main__:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Claude Usage Monitor — Install Script
-# Creates a venv, installs deps, and registers as a login item via launchd.
+# CredClaude — Install Script
+# Builds .app bundle, copies to ~/Applications, registers launchd auto-start.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="$HOME/.claude-usage-monitor"
+APP_DIR="$HOME/.credclaude"
 VENV_DIR="$SCRIPT_DIR/venv"
-PLIST_NAME="com.veer.claude-usage-monitor"
+PLIST_NAME="com.veer.credclaude"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_NAME.plist"
-PYTHON="$VENV_DIR/bin/python"
+APP_NAME="CredClaude"
+APP_DEST="$HOME/Applications/$APP_NAME.app"
 
-echo "=== Claude Usage Monitor Installer ==="
+echo "=== CredClaude Installer ==="
 echo ""
 
 # 1. Create venv
@@ -21,12 +22,24 @@ python3 -m venv "$VENV_DIR"
 # 2. Install deps
 echo "→ Installing dependencies..."
 "$VENV_DIR/bin/pip" install --quiet --upgrade pip
-"$VENV_DIR/bin/pip" install --quiet -r "$SCRIPT_DIR/requirements.txt"
+"$VENV_DIR/bin/pip" install --quiet -e "$SCRIPT_DIR"
 
-# 3. Create app support dir
+# 3. Build .app bundle
+echo "→ Building app bundle..."
+bash "$SCRIPT_DIR/build_app.sh"
+
+# 4. Copy to ~/Applications
+echo "→ Installing to ~/Applications..."
+mkdir -p "$HOME/Applications"
+if [ -d "$APP_DEST" ]; then
+  rm -rf "$APP_DEST"
+fi
+cp -R "$SCRIPT_DIR/dist/$APP_NAME.app" "$APP_DEST"
+
+# 5. Create app support dir
 mkdir -p "$APP_DIR"
 
-# 4. Write launchd plist
+# 6. Write launchd plist
 echo "→ Registering login item with launchd..."
 mkdir -p "$HOME/Library/LaunchAgents"
 
@@ -41,26 +54,25 @@ cat > "$PLIST_PATH" <<PLIST
 
   <key>ProgramArguments</key>
   <array>
-    <string>$PYTHON</string>
-    <string>$SCRIPT_DIR/monitor.py</string>
+    <string>open</string>
+    <string>-a</string>
+    <string>$APP_DEST</string>
   </array>
 
   <key>RunAtLoad</key>
   <true/>
 
   <key>KeepAlive</key>
-  <true/>
+  <false/>
 
-  <key>StandardOutPath</key>
-  <string>$APP_DIR/monitor.log</string>
-
-  <key>StandardErrorPath</key>
-  <string>$APP_DIR/monitor.err</string>
+  <!-- Note: stdout/stderr not captured here because 'open -a' spawns a
+       separate process. App logs are written to ~/.credclaude/monitor.log
+       by the Python logging module (RotatingFileHandler). -->
 </dict>
 </plist>
 PLIST
 
-# 5. Load the agent now
+# 7. Load the agent
 if launchctl list "$PLIST_NAME" &>/dev/null; then
   echo "→ Reloading existing launchd agent..."
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
@@ -68,8 +80,12 @@ fi
 launchctl load "$PLIST_PATH"
 
 echo ""
-echo "✅ Installed! Claude Usage Monitor is now running in your menu bar."
+echo "✅ Installed! CredClaude is now running in your menu bar."
 echo "   It will auto-start on every login."
 echo ""
-echo "   To uninstall:  bash uninstall.sh"
-echo "   Logs:          $APP_DIR/monitor.log"
+echo "   App:        $APP_DEST"
+echo "   Config:     $APP_DIR/config.json"
+echo "   Logs:       $APP_DIR/monitor.log"
+echo "   Pricing:    $APP_DIR/pricing.json"
+echo ""
+echo "   To uninstall:  bash $SCRIPT_DIR/uninstall.sh"

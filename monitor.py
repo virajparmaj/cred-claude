@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Claude Code Usage Monitor — macOS Menu Bar App
+DEPRECATED — This single-file version has been replaced by the
+credclaude/ package. Kept for reference only.
+
+Use `python -m credclaude` or the installed .app bundle instead.
+
+Original: Claude Code Usage Monitor — macOS Menu Bar App
 Tracks daily compute cost from session JSONL files + billing period reset.
 """
 
@@ -19,7 +24,7 @@ import rumps
 # Paths
 # ---------------------------------------------------------------------------
 CLAUDE_DIR = Path.home() / ".claude"
-APP_DIR = Path.home() / ".claude-usage-monitor"
+APP_DIR = Path.home() / ".credclaude"
 CONFIG_PATH = APP_DIR / "config.json"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 NOTIF_LOCK_PATH = APP_DIR / ".last_reset_notif"
@@ -417,11 +422,11 @@ class ClaudeUsageMonitor(rumps.App):
     def _first_run_setup(self) -> None:
         resp = rumps.Window(
             message=(
-                "Welcome to Claude Usage Monitor!\n\n"
+                "Welcome to CredClaude!\n\n"
                 "What day of the month does your Claude billing reset?\n"
                 "(Enter 1–28, e.g. '1' for the 1st of each month)"
             ),
-            title="Claude Usage Monitor — Setup (1/2)",
+            title="CredClaude — Setup (1/2)",
             default_text="1",
             ok="Next",
             cancel="Skip",
@@ -439,7 +444,7 @@ class ClaudeUsageMonitor(rumps.App):
                 "Light day: ~$20–50. Heavy agentic day: ~$80–150.\n"
                 "Start with $100 and adjust after a few days."
             ),
-            title="Claude Usage Monitor — Setup (2/2)",
+            title="CredClaude — Setup (2/2)",
             default_text="100.00",
             ok="Done",
             cancel="Skip",
