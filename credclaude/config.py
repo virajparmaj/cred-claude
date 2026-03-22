@@ -38,6 +38,7 @@ DEFAULT_CONFIG: dict = {
     "plan_tier": "pro",  # "pro" | "max_5x" | "max_20x"
     "stale_threshold_minutes": 30,
     "refresh_interval_sec": 60,
+    "auto_refresh": True,
 }
 
 
@@ -70,6 +71,11 @@ def load_config() -> dict:
                 logger.warning("Invalid plan_tier '%s', resetting to default",
                                cfg.get("plan_tier"))
                 cfg["plan_tier"] = DEFAULT_CONFIG["plan_tier"]
+            interval = cfg.get("refresh_interval_sec")
+            if not isinstance(interval, (int, float)) or interval < 10 or interval > 3600:
+                logger.warning("Invalid refresh_interval_sec '%s', resetting to default",
+                               interval)
+                cfg["refresh_interval_sec"] = DEFAULT_CONFIG["refresh_interval_sec"]
             return cfg
         except Exception as e:
             logger.warning("Failed to load config, using defaults: %s", e)

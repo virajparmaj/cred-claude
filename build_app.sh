@@ -56,7 +56,7 @@ cat > "$CONTENTS/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
   <key>CFBundleExecutable</key>
-  <string>launch</string>
+  <string>CredClaude</string>
   <key>LSUIElement</key>
   <true/>
   <key>LSBackgroundOnly</key>
@@ -67,23 +67,74 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Launcher script — runs the Python package via the repo's venv
-cat > "$MACOS/launch" <<LAUNCHER
-#!/usr/bin/env bash
-# CredClaude launcher
-REPO_DIR="$SCRIPT_DIR"
+# Compiled launcher stub — gives macOS the correct process identity
+# so Stage Manager / Dock show "CredClaude" instead of "Python".
+LAUNCHER_SRC="$MACOS/launcher.c"
+cat > "$LAUNCHER_SRC" <<'CSRC'
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <libgen.h>
+#include <mach-o/dyld.h>
 
-# Validate venv exists (fails visibly if repo was moved after install)
-if [ ! -d "\$REPO_DIR/venv" ]; then
-  osascript -e 'display dialog "CredClaude: venv not found.\nThe source repo may have moved.\nPlease re-run install.sh." buttons {"OK"} default button "OK" with icon stop' 2>/dev/null
-  exit 1
-fi
+int main(int argc, char *argv[]) {
+    /* Resolve the directory containing this executable */
+    char exe[4096];
+    uint32_t sz = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &sz) != 0) {
+        fprintf(stderr, "CredClaude: cannot resolve executable path\n");
+        return 1;
+    }
+    char *real = realpath(exe, NULL);
+    if (!real) { perror("realpath"); return 1; }
+    char *dir = dirname(real);           /* .../Contents/MacOS */
+    char *contents = dirname(dir);       /* .../Contents        */
+    char *app_dir = dirname(contents);   /* .../CredClaude.app  */
 
-cd "\$REPO_DIR"
-exec "\$REPO_DIR/venv/bin/python" -m credclaude
-LAUNCHER
+    /* Walk up from the .app bundle to find the repo root.
+       Installed layout: ~/Applications/CredClaude.app  →  repo is at REPO_DIR
+       Dev layout:       <repo>/dist/CredClaude.app     →  repo is dirname(dirname(app_dir))
+       We use the CREDCLAUDE_REPO env var if set, otherwise assume the
+       repo path was baked in at build time (see sed below). */
+    const char *repo = getenv("CREDCLAUDE_REPO");
+    if (!repo) repo = "@@REPO_DIR@@";
 
-chmod +x "$MACOS/launch"
+    /* Validate venv */
+    char venv_python[4096];
+    snprintf(venv_python, sizeof(venv_python), "%s/venv/bin/python", repo);
+    if (access(venv_python, X_OK) != 0) {
+        /* Show a dialog via osascript */
+        system("osascript -e 'display dialog \"CredClaude: venv not found.\\n"
+               "The source repo may have moved.\\n"
+               "Please re-run install.sh.\" buttons {\"OK\"} "
+               "default button \"OK\" with icon stop' 2>/dev/null");
+        free(real);
+        return 1;
+    }
+
+    /* chdir to repo so relative imports work */
+    chdir(repo);
+
+    /* exec the Python interpreter — this process becomes Python but
+       macOS already registered our binary name as "CredClaude". */
+    char *new_argv[] = { "CredClaude", "-m", "credclaude", NULL };
+    execv(venv_python, new_argv);
+
+    /* If exec fails */
+    perror("execv");
+    free(real);
+    return 1;
+}
+CSRC
+
+# Bake in the repo path
+sed -i '' "s|@@REPO_DIR@@|$SCRIPT_DIR|g" "$LAUNCHER_SRC"
+
+# Compile the launcher
+echo "   Compiling launcher stub..."
+cc -O2 -o "$MACOS/CredClaude" "$LAUNCHER_SRC"
+rm "$LAUNCHER_SRC"
 
 echo "✅ Built: $APP_DIR"
 echo "   Copy to ~/Applications/ to use."

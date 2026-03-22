@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 from pathlib import Path
 
+import objc
 import rumps
-from AppKit import NSApplication, NSImage
+from AppKit import NSApplication, NSImage, NSObject
 from Foundation import NSProcessInfo
 
 _ICON_PATH = Path(__file__).parent.parent / "claude_monitor_logo.png"
@@ -26,7 +28,6 @@ from credclaude.config import (
     load_config,
     save_config,
 )
-from credclaude.formatting import make_bar
 from credclaude.limit_providers import CompositeLimitProvider
 from credclaude.models import ProviderState
 from credclaude.notifications import (
@@ -38,17 +39,8 @@ from credclaude.notifications import (
 
 logger = logging.getLogger("credclaude.app")
 
-
-def _error_label(limit) -> str:
-    """Return a short user-facing string explaining why data is unavailable."""
-    if limit.error:
-        snippet = limit.error[:40]
-        return f"⚠ {snippet}"
-    if limit.state == ProviderState.OFFLINE:
-        return "⚠ Offline — check network"
-    if limit.state == ProviderState.STALE:
-        return "⚠ Stale data — retrying…"
-    return "Loading…"
+# Minimum seconds between menu-open refreshes to avoid API spam
+_MENU_OPEN_STALE_SEC = 30
 
 
 def _fmt_relative(dt: datetime.datetime | None) -> str:
@@ -67,6 +59,20 @@ def _fmt_relative(dt: datetime.datetime | None) -> str:
     return f"{h}h {m}m"
 
 
+class _MenuDelegate(NSObject):
+    """NSMenu delegate that triggers a refresh when the menu opens."""
+
+    app_ref = objc.ivar()
+
+    def menuWillOpen_(self, menu):
+        app = self.app_ref
+        if app is None:
+            return
+        elapsed = time.monotonic() - app._last_refresh_time
+        if elapsed >= _MENU_OPEN_STALE_SEC:
+            app._refresh_now(None)
+
+
 class CredClaude(rumps.App):
     def __init__(self) -> None:
         icon = str(_ICON_PATH) if _ICON_PATH.exists() else None
@@ -83,6 +89,9 @@ class CredClaude(rumps.App):
         # Limit provider (Official OAuth API + Estimator fallback)
         self._provider = CompositeLimitProvider(self.config)
 
+        # Track last refresh time for menu-open staleness gate
+        self._last_refresh_time = 0.0
+
         # First-run wizard if no config exists yet
         if not CONFIG_PATH.exists():
             self._first_run_setup()
@@ -93,20 +102,29 @@ class CredClaude(rumps.App):
 
         # Build menu
         self.menu = [
-            rumps.MenuItem("session_bar"),
-            rumps.separator,
             rumps.MenuItem("Refresh", callback=self._refresh_now),
-            rumps.MenuItem("Preferences...", callback=self._show_preferences),
+            rumps.MenuItem("Settings", callback=self._show_settings),
             rumps.separator,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
 
+        # Set up menu delegate for click-to-refresh
+        self._menu_delegate = _MenuDelegate.alloc().init()
+        self._menu_delegate.app_ref = self
+        # rumps wraps NSMenu — access the underlying Cocoa object
+        ns_menu = getattr(self._menu, '_menu', None)
+        if ns_menu is not None:
+            ns_menu.setDelegate_(self._menu_delegate)
+
         self._startup_timer = rumps.Timer(self._startup_update, 5)
         self._startup_timer.start()
 
+        # Auto-refresh timer (only starts if auto_refresh is enabled)
         refresh_sec = self.config.get("refresh_interval_sec", REFRESH_INTERVAL_SEC)
         self._tick_timer = rumps.Timer(self._tick, refresh_sec)
-        self._tick_timer.start()
+        if self.config.get("auto_refresh", True):
+            self._tick_timer.start()
+
         rumps.Timer(self._check_notifications, NOTIF_CHECK_INTERVAL_SEC).start()
         logger.info("CredClaude started (v%s)", __version__)
 
@@ -162,18 +180,10 @@ class CredClaude(rumps.App):
             else:
                 self.title = "⏸ --"
 
-        # ------------------------------------------------------------------
-        # Session bar
-        # ------------------------------------------------------------------
-        if pct is not None:
-            bar = make_bar(pct)
-            self.menu["session_bar"].title = f"[{bar}]  {pct:.0f}% used"
-        else:
-            self.menu["session_bar"].title = _error_label(limit)
-
         # Store for notification checks
         self._last_pct = pct
         self._last_limit = limit
+        self._last_refresh_time = time.monotonic()
 
     # ------------------------------------------------------------------
     # Timer callbacks
@@ -190,7 +200,7 @@ class CredClaude(rumps.App):
         self._update()
 
     def _tick(self, _sender) -> None:
-        """Poll every 60 seconds — no adaptive gating."""
+        """Poll at the configured interval."""
         self.config = load_config()
         self._provider.update_config(self.config)
         self._update()
@@ -237,20 +247,32 @@ class CredClaude(rumps.App):
         self._provider.update_config(self.config)
         self._update()
 
-    def _show_preferences(self, _sender) -> None:
-        from credclaude.preferences import PreferencesWindow
-        PreferencesWindow.show(self.config, self._on_preferences_saved)
+    def _show_settings(self, _sender) -> None:
+        from credclaude.settings import SettingsWindow
+        SettingsWindow.show(self.config, self._on_settings_saved)
 
-    def _on_preferences_saved(self, cfg: dict) -> None:
+    def _on_settings_saved(self, cfg: dict) -> None:
         old_interval = self.config.get("refresh_interval_sec", REFRESH_INTERVAL_SEC)
+        old_auto = self.config.get("auto_refresh", True)
         self.config = cfg
         self._provider.update_config(cfg)
 
         new_interval = cfg.get("refresh_interval_sec", REFRESH_INTERVAL_SEC)
-        if new_interval != old_interval:
-            self._tick_timer.stop()
-            self._tick_timer = rumps.Timer(self._tick, new_interval)
-            self._tick_timer.start()
-            logger.info("Refresh interval changed to %ds", new_interval)
+        new_auto = cfg.get("auto_refresh", True)
 
-        logger.info("Preferences applied")
+        # Handle auto-refresh toggle and interval changes
+        if new_auto:
+            if not old_auto or new_interval != old_interval:
+                self._tick_timer.stop()
+                self._tick_timer = rumps.Timer(self._tick, new_interval)
+                self._tick_timer.start()
+                logger.info("Auto-refresh ON, interval %ds", new_interval)
+            if not old_auto:
+                # Trigger an immediate refresh when re-enabling
+                self._update()
+        else:
+            if old_auto:
+                self._tick_timer.stop()
+                logger.info("Auto-refresh OFF")
+
+        logger.info("Settings applied")

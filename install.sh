@@ -15,6 +15,15 @@ APP_DEST="$HOME/Applications/$APP_NAME.app"
 echo "=== CredClaude Installer ==="
 echo ""
 
+# 0. Quit any running instance before rebuilding
+if pgrep -x "CredClaude" &>/dev/null; then
+  echo "→ Stopping running CredClaude instance..."
+  osascript -e 'tell application "CredClaude" to quit' 2>/dev/null || true
+  sleep 1
+  # Force-kill if still running after graceful quit
+  pkill -x "CredClaude" 2>/dev/null || true
+fi
+
 # 1. Create venv
 echo "→ Creating virtual environment..."
 python3 -m venv "$VENV_DIR"
@@ -78,6 +87,12 @@ if launchctl list "$PLIST_NAME" &>/dev/null; then
   launchctl unload "$PLIST_PATH" 2>/dev/null || true
 fi
 launchctl load "$PLIST_PATH"
+
+# 8. Launch the new version explicitly
+# (launchctl load with RunAtLoad only fires on a fresh load — open ensures the
+# app starts immediately in both fresh-install and update scenarios)
+echo "→ Launching CredClaude..."
+open "$APP_DEST"
 
 echo ""
 echo "✅ Installed! CredClaude is now running in your menu bar."

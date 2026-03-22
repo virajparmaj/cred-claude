@@ -9,6 +9,14 @@ APP_DEST="$HOME/Applications/$APP_NAME.app"
 
 echo "=== Uninstalling CredClaude ==="
 
+# Quit the running app before removing files
+if pgrep -x "CredClaude" &>/dev/null; then
+  echo "→ Stopping CredClaude..."
+  osascript -e 'tell application "CredClaude" to quit' 2>/dev/null || true
+  sleep 1
+  pkill -x "CredClaude" 2>/dev/null || true
+fi
+
 # Stop and unload launchd agent
 if launchctl list "$PLIST_NAME" &>/dev/null; then
   echo "→ Stopping launchd agent..."

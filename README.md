@@ -21,33 +21,22 @@ CredClaude monitors your Claude Code sessions locally and displays your daily co
 
 ## How It Looks When Operating
 
-Once installed, CredClaude appears in your macOS menu bar (top-right). The display shows:
+Once installed, CredClaude appears in your macOS menu bar (top-right). The display shows your current session usage and reset countdown:
 
 ```
-$12.45 (65%) | 8d 14h
+65% | 8h 14m
 ```
 
-Click the menu bar icon to expand the full breakdown:
+Click the menu bar icon to expand:
 
 ```
-📊
-──────────────────────────────────────
-$12.45 / $20.00 today (65%)
-[████████████░░░░░░░░]
-──────────────────────────────────────
-Opus       $5.30    (50k in / 15k out)
-Sonnet     $6.10    (120k in / 45k out)
-Haiku      $1.05    (30k in / 10k out)
-──────────────────────────────────────
-Period total: $87.50 (7 days)
-Resets in 8d 14h 32m
-──────────────────────────────────────
-⚙️ Settings
-🔄 Refresh Now
-❌ Quit
+Refresh
+Settings
+————————
+Quit
 ```
 
-The menu updates every 5 minutes and refreshes automatically whenever you use Claude Code.
+The display refreshes automatically every 60 seconds (configurable in Settings) and also triggers when you open the menu.
 
 ---
 
@@ -118,9 +107,11 @@ bash uninstall.sh
 ```
 
 This will:
-1. Stop the launchd agent
-2. Remove the `.app` from `~/Applications/`
-3. Clean up configuration files
+1. Stop the running CredClaude process
+2. Stop the launchd agent
+3. Remove the `.app` from `~/Applications/`
+
+Config and logs at `~/.credclaude/` are kept. Delete that folder manually for a full clean removal.
 
 ## Configuration
 
@@ -131,9 +122,11 @@ Config is stored at `~/.credclaude/config.json`:
 | `plan_tier` | string | `"pro"` | Your Claude Code plan: `pro`, `max_5x`, `max_20x` |
 | `billing_day` | int | `1` | Day of month your billing resets (1-28) |
 | `daily_budget_usd` | float\|null | `null` | Manual daily budget override. `null` = use plan estimate |
-| `warn_at_pct` | int | `80` | Notification threshold (% of daily budget) |
+| `warn_at_pct` | int | `80` | Notification threshold (% of session usage) |
 | `notifications_enabled` | bool | `true` | Enable/disable macOS notifications |
 | `stale_threshold_minutes` | int | `30` | Minutes before data is considered stale |
+| `auto_refresh` | bool | `true` | Enable automatic refresh on the set interval |
+| `refresh_interval_sec` | int | `60` | Seconds between auto-refreshes (10–3600) |
 
 All settings are also editable from the menu bar → Settings.
 
