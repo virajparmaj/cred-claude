@@ -4,10 +4,10 @@ from __future__ import annotations
 
 
 def make_bar(pct: float, width: int = 20) -> str:
-    """Return a text progress bar like ████████░░░░░░░░░░░░."""
+    """Return a text progress bar like ■■■■■■■■□□□□□□□□□□□□."""
     clamped = max(0, min(100, pct))
     filled = round(clamped / 100 * width)
-    return "\u2588" * filled + "\u2591" * (width - filled)
+    return "\u25a0" * filled + "\u25a1" * (width - filled)
 
 
 def fmt_tokens(n: int) -> str:

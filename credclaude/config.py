@@ -37,6 +37,7 @@ DEFAULT_CONFIG: dict = {
     "notifications_enabled": True,
     "plan_tier": "pro",  # "pro" | "max_5x" | "max_20x"
     "stale_threshold_minutes": 30,
+    "refresh_interval_sec": 60,
 }
 
 

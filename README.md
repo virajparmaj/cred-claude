@@ -1,6 +1,8 @@
 # CredClaude
 
-<img src="claude_monitor_logo.png" alt="CredClaude logo" width="200"/>
+<div align="center">
+    <img src="claude_monitor_logo.png" alt="CredClaude logo" width="200"/>
+</div>
 
 ## What is CredClaude?
 
