@@ -10,19 +10,21 @@ from typing import Callable
 
 import objc
 from AppKit import (
+    NSAttributedString,
     NSBackingStoreBuffered,
-    NSBezelStyleRounded,
     NSButton,
     NSCenterTextAlignment,
     NSClosableWindowMask,
     NSColor,
     NSFont,
+    NSForegroundColorAttributeName,
     NSImage,
     NSLeftTextAlignment,
     NSMakeRect,
     NSMiniaturizableWindowMask,
     NSObject,
     NSPopUpButton,
+    NSRightTextAlignment,
     NSSwitch,
     NSTextField,
     NSTitledWindowMask,
@@ -40,16 +42,11 @@ _REPO_DIR = Path(__file__).parent.parent
 _INSTALL_SCRIPT = _REPO_DIR / "install.sh"
 _ICON_PATH = _REPO_DIR / "claude_monitor_logo.png"
 
-PLAN_TIERS = [
-    ("pro", "Pro ($20/mo)"),
-    ("max_5x", "Max 5x ($100/mo)"),
-    ("max_20x", "Max 20x ($200/mo)"),
-]
-
-_W = 460
-_H = 444
+_W = 500
+_H = 510
 _PAD = 24
 _INNER = 18
+_ROW_H = 44
 
 
 def _label(text: str, x: float, y: float, w: float = 220, h: float = 20,
@@ -81,6 +78,43 @@ def _section_box(y: float, h: float) -> NSView:
     box.layer().setBorderColor_(NSColor.separatorColor().CGColor())
     box.layer().setBorderWidth_(0.5)
     return box
+
+
+def _section_label(text: str, x: float, y: float) -> NSTextField:
+    lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(x, y, _W - 2 * _PAD, 16))
+    lbl.setStringValue_(text.upper())
+    lbl.setBezeled_(False)
+    lbl.setDrawsBackground_(False)
+    lbl.setEditable_(False)
+    lbl.setSelectable_(False)
+    lbl.setAlignment_(NSLeftTextAlignment)
+    lbl.setFont_(NSFont.systemFontOfSize_(11))
+    lbl.setTextColor_(NSColor.secondaryLabelColor())
+    return lbl
+
+
+def _separator(parent: NSView, y: float) -> NSView:
+    box_w = _W - 2 * _PAD
+    sep = NSView.alloc().initWithFrame_(NSMakeRect(0, y, box_w, 1))
+    sep.setWantsLayer_(True)
+    sep.layer().setBackgroundColor_(NSColor.separatorColor().CGColor())
+    parent.addSubview_(sep)
+    return sep
+
+
+def _chevron(parent: NSView, row_y: float, color: object = None) -> NSTextField:
+    box_w = _W - 2 * _PAD
+    lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(box_w - _INNER - 14, row_y + 12, 14, 20))
+    lbl.setStringValue_("›")
+    lbl.setBezeled_(False)
+    lbl.setDrawsBackground_(False)
+    lbl.setEditable_(False)
+    lbl.setSelectable_(False)
+    lbl.setAlignment_(NSRightTextAlignment)
+    lbl.setFont_(NSFont.systemFontOfSize_(16))
+    lbl.setTextColor_(color if color else NSColor.secondaryLabelColor())
+    parent.addSubview_(lbl)
+    return lbl
 
 
 class _FieldDelegate(NSObject):
@@ -118,25 +152,34 @@ class _Delegate(NSObject):
         sw = self.settings_window
         if sw:
             enabled = bool(sender.state())
-            sw._refresh_field.setHidden_(not enabled)
-            sw._refresh_suffix.setHidden_(not enabled)
-            sw._refresh_helper.setHidden_(enabled)
             sw._refresh_field.setEditable_(enabled)
             sw._refresh_field.setEnabled_(enabled)
+            sw._unit_popup.setEnabled_(enabled)
 
-    def onAlertsToggle_(self, sender):
+    def onResetDefaults_(self, sender):
         sw = self.settings_window
         if sw:
-            enabled = bool(sender.state())
-            sw._threshold_field.setEditable_(enabled)
-            sw._threshold_field.setEnabled_(enabled)
-            sw._threshold_field.setAlphaValue_(1.0 if enabled else 0.4)
-            sw._threshold_label.setTextColor_(
-                None if enabled else NSColor.tertiaryLabelColor()
-            )
-            sw._threshold_suffix.setTextColor_(
-                NSColor.secondaryLabelColor() if enabled else NSColor.tertiaryLabelColor()
-            )
+            sw._reset_to_defaults()
+
+    def onUnitChange_(self, sender):
+        sw = self.settings_window
+        if sw is None:
+            return
+        new_unit = str(sender.titleOfSelectedItem())
+        if new_unit == sw._current_unit:
+            return
+        try:
+            raw = int(sw._refresh_field.stringValue().strip())
+        except ValueError:
+            raw = 0
+        if sw._current_unit == "sec" and new_unit == "min":
+            converted = int(round(raw / 60))
+        elif sw._current_unit == "min" and new_unit == "sec":
+            converted = raw * 60
+        else:
+            converted = raw
+        sw._current_unit = new_unit
+        sw._refresh_field.setStringValue_(str(converted))
 
     def finishUpdate_(self, info):
         sw = self.settings_window
@@ -159,19 +202,23 @@ class SettingsWindow:
 
     _instance: SettingsWindow | None = None
 
-    def __init__(self, config: dict, on_save: Callable[[dict], None]) -> None:
+    def __init__(self, config: dict, on_save: Callable[[dict], None],
+                 data_source: str = "OAuth (Live)") -> None:
         self._config = config.copy()
         self._on_save = on_save
+        self._data_source = data_source
         self._updating = False
 
     @classmethod
-    def show(cls, config: dict, on_save: Callable[[dict], None]) -> None:
+    def show(cls, config: dict, on_save: Callable[[dict], None],
+             data_source: str = "OAuth (Live)") -> None:
         if cls._instance is not None:
             cls._instance._window.makeKeyAndOrderFront_(None)
             return
-        inst = cls(config, on_save)
+        inst = cls(config, on_save, data_source)
         cls._instance = inst
         inst._build()
+        inst._window.makeFirstResponder_(inst._window.contentView())  # prevent blue focus ring
         inst._window.center()
         inst._window.makeKeyAndOrderFront_(None)
 
@@ -183,7 +230,6 @@ class SettingsWindow:
         self._window.setTitle_("CredClaude Settings")
         self._window.setReleasedWhenClosed_(False)
 
-        # Set window icon (fixes Python icon in Stage Manager / Mission Control)
         if _ICON_PATH.exists():
             ns_icon = NSImage.alloc().initWithContentsOfFile_(str(_ICON_PATH))
             if ns_icon:
@@ -193,43 +239,149 @@ class SettingsWindow:
         self._delegate.settings_window = self
         self._window.setDelegate_(self._delegate)
 
-        # Field delegate for live validation
         self._field_delegate = _FieldDelegate.alloc().init()
         self._field_delegate.settings_window = self
 
         content = self._window.contentView()
-        box_w = _W - 2 * _PAD
-        y = _H - 50
+        box_w = _W - 2 * _PAD   # 452
+        self._current_unit = "sec"
+
+        # Hidden update status label (used programmatically by finishUpdate_)
+        self._update_status = _label(
+            "", 0, 4, w=_W, h=14, size=10,
+            color=NSColor.secondaryLabelColor()
+        )
+        self._update_status.setAlignment_(NSCenterTextAlignment)
+        content.addSubview_(self._update_status)
 
         # =================================================================
-        # Monitoring
+        # Footer
         # =================================================================
-        content.addSubview_(_label("Monitoring", _PAD, y, bold=True, size=14))
-        y -= 8
-        box_h = 100
-        box = _section_box(y - box_h, box_h)
+        footer = _label(
+            "Settings are saved automatically",
+            0, 20, w=_W, h=16, size=11,
+            color=NSColor.tertiaryLabelColor()
+        )
+        footer.setAlignment_(NSCenterTextAlignment)
+        content.addSubview_(footer)
+
+        # =================================================================
+        # ACTIONS section  (y=46 label, y=70 box h=132)
+        # =================================================================
+        content.addSubview_(_section_label("Actions", _PAD, 46))
+        box = _section_box(70, 132)
         content.addSubview_(box)
 
-        # Plan tier
-        ry = box_h - 30
-        box.addSubview_(_label("Plan tier", _INNER, ry))
-        self._tier_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(
-            NSMakeRect(box_w - _INNER - 165, ry - 2, 165, 25), False
+        # Row 1 — bottom: Check for Updates (local y=0..44)
+        self._update_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(_INNER, 0, box_w - 2 * _INNER - 24, _ROW_H)
         )
-        current_tier = self._config.get("plan_tier", "pro")
-        for key, display in PLAN_TIERS:
-            self._tier_popup.addItemWithTitle_(display)
-            if key == current_tier:
-                self._tier_popup.selectItemWithTitle_(display)
-        box.addSubview_(self._tier_popup)
+        self._update_btn.setTitle_("Check for Updates")
+        self._update_btn.setBordered_(False)
+        self._update_btn.setAlignment_(NSLeftTextAlignment)
+        self._update_btn.setFont_(NSFont.systemFontOfSize_(13))
+        self._update_btn.setTarget_(self._delegate)
+        self._update_btn.setAction_(
+            objc.selector(self._delegate.onUpdate_, signature=b"v@:@")
+        )
+        box.addSubview_(self._update_btn)
+        _chevron(box, 0)
 
-        # Refresh automatically
-        ry -= 32
-        box.addSubview_(_label("Refresh automatically", _INNER, ry))
-        self._auto_refresh_switch = NSSwitch.alloc().initWithFrame_(
-            NSMakeRect(box_w - _INNER - 40, ry, 40, 22)
+        _separator(box, 44)
+
+        # Row 2 — middle: View Logs (local y=44..88)
+        self._logs_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(_INNER, 44, box_w - 2 * _INNER - 24, _ROW_H)
         )
+        self._logs_btn.setTitle_("View Logs")
+        self._logs_btn.setBordered_(False)
+        self._logs_btn.setAlignment_(NSLeftTextAlignment)
+        self._logs_btn.setFont_(NSFont.systemFontOfSize_(13))
+        self._logs_btn.setTarget_(self._delegate)
+        self._logs_btn.setAction_(
+            objc.selector(self._delegate.onViewLogs_, signature=b"v@:@")
+        )
+        box.addSubview_(self._logs_btn)
+        _chevron(box, 44)
+
+        _separator(box, 88)
+
+        # Row 3 — top: Reset to Defaults (local y=88..132)
+        reset_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(_INNER, 88, box_w - 2 * _INNER - 24, _ROW_H)
+        )
+        red_title = NSAttributedString.alloc().initWithString_attributes_(
+            "Reset to Defaults",
+            {NSForegroundColorAttributeName: NSColor.systemRedColor()}
+        )
+        reset_btn.setAttributedTitle_(red_title)
+        reset_btn.setBordered_(False)
+        reset_btn.setAlignment_(NSLeftTextAlignment)
+        reset_btn.setFont_(NSFont.systemFontOfSize_(13))
+        reset_btn.setTarget_(self._delegate)
+        reset_btn.setAction_(
+            objc.selector(self._delegate.onResetDefaults_, signature=b"v@:@")
+        )
+        box.addSubview_(reset_btn)
+        _chevron(box, 88, color=NSColor.systemRedColor())
+
+        # =================================================================
+        # SYSTEM section  (y=226 label, y=250 box h=88)
+        # =================================================================
+        content.addSubview_(_section_label("System", _PAD, 226))
+        box = _section_box(250, 88)
+        content.addSubview_(box)
+
+        # Row 2 — top: Version (local y=44..88)
+        box.addSubview_(_label("Version", _INNER, 56))
+        ver_lbl = _label(
+            str(__version__),
+            box_w - _INNER - 100, 56, w=100, h=20,
+            color=NSColor.secondaryLabelColor()
+        )
+        ver_lbl.setAlignment_(NSRightTextAlignment)
+        box.addSubview_(ver_lbl)
+
+        _separator(box, 44)
+
+        # Row 1 — bottom: Data source (local y=0..44)
+        box.addSubview_(_label("Data source", _INNER, 12))
+
+        # Dot indicator color depends on source state
+        _ds_lower = self._data_source.lower()
+        if "unavailable" in _ds_lower or "estimated" in _ds_lower:
+            _dot_color = NSColor.systemOrangeColor()
+        else:
+            _dot_color = NSColor.systemGreenColor()
+
+        dot = NSView.alloc().initWithFrame_(NSMakeRect(box_w - _INNER - 110, 18, 8, 8))
+        dot.setWantsLayer_(True)
+        dot.layer().setBackgroundColor_(_dot_color.CGColor())
+        dot.layer().setCornerRadius_(4)
+        box.addSubview_(dot)
+
+        src_lbl = _label(
+            self._data_source,
+            box_w - _INNER - 100, 12, w=100, h=20,
+            color=_dot_color
+        )
+        src_lbl.setAlignment_(NSRightTextAlignment)
+        box.addSubview_(src_lbl)
+
+        # =================================================================
+        # MONITORING section  (y=362 label, y=386 box h=88)
+        # =================================================================
+        content.addSubview_(_section_label("Monitoring", _PAD, 362))
+        box = _section_box(386, 88)
+        content.addSubview_(box)
+
         auto_refresh_on = self._config.get("auto_refresh", True)
+
+        # Row 2 — top: Auto-refresh toggle (local y=44..88)
+        box.addSubview_(_label("Auto-refresh", _INNER, 56))
+        self._auto_refresh_switch = NSSwitch.alloc().initWithFrame_(
+            NSMakeRect(box_w - _INNER - 40, 55, 40, 22)
+        )
         self._auto_refresh_switch.setState_(1 if auto_refresh_on else 0)
         self._auto_refresh_switch.setTarget_(self._delegate)
         self._auto_refresh_switch.setAction_(
@@ -237,217 +389,53 @@ class SettingsWindow:
         )
         box.addSubview_(self._auto_refresh_switch)
 
-        # Refresh every
-        ry -= 32
-        box.addSubview_(_label("Refresh every", _INNER, ry))
-        self._refresh_field = _input_field(box_w - _INNER - 110, ry, 55)
+        _separator(box, 44)
+
+        # Row 1 — bottom: Refresh interval + unit (local y=0..44)
+        box.addSubview_(_label("Refresh interval", _INNER, 12))
+
+        self._unit_popup = NSPopUpButton.alloc().initWithFrame_(
+            NSMakeRect(box_w - _INNER - 60, 9, 60, 26)
+        )
+        self._unit_popup.addItemWithTitle_("sec")
+        self._unit_popup.addItemWithTitle_("min")
+        self._unit_popup.setTarget_(self._delegate)
+        self._unit_popup.setAction_(
+            objc.selector(self._delegate.onUnitChange_, signature=b"v@:@")
+        )
+        self._unit_popup.setEnabled_(auto_refresh_on)
+        box.addSubview_(self._unit_popup)
+
+        self._refresh_field = _input_field(box_w - _INNER - 135, 11, 70, 22)
         self._refresh_field.setStringValue_(
             str(self._config.get("refresh_interval_sec", REFRESH_INTERVAL_SEC))
         )
         self._refresh_field.setEditable_(auto_refresh_on)
         self._refresh_field.setEnabled_(auto_refresh_on)
         self._refresh_field.setDelegate_(self._field_delegate)
-        self._refresh_field.setHidden_(not auto_refresh_on)
         box.addSubview_(self._refresh_field)
-        self._refresh_suffix = _label(
-            "seconds", box_w - _INNER - 52, ry + 2, w=50, size=11,
-            color=NSColor.secondaryLabelColor()
-        )
-        self._refresh_suffix.setHidden_(not auto_refresh_on)
-        box.addSubview_(self._refresh_suffix)
 
-        # Helper text shown when auto-refresh is OFF
-        self._refresh_helper = _label(
-            "Use menu bar Refresh action", box_w - _INNER - 210, ry, w=210, size=11,
-            color=NSColor.tertiaryLabelColor()
-        )
-        self._refresh_helper.setHidden_(auto_refresh_on)
-        box.addSubview_(self._refresh_helper)
-
-        # Validation hint for refresh interval
-        self._refresh_hint = _label(
-            "", _INNER, ry - 16, w=box_w - 2 * _INNER, h=14, size=10,
-            color=NSColor.systemRedColor()
-        )
-        self._refresh_hint.setHidden_(True)
-        box.addSubview_(self._refresh_hint)
-
-        y -= box_h + 26
-
-        # =================================================================
-        # Alerts
-        # =================================================================
-        content.addSubview_(_label("Alerts", _PAD, y, bold=True, size=14))
-        y -= 8
-        box_h = 68
-        box = _section_box(y - box_h, box_h)
-        content.addSubview_(box)
-
-        # Usage alerts toggle
-        ry = box_h - 30
-        box.addSubview_(_label("Usage alerts", _INNER, ry))
-        self._notif_switch = NSSwitch.alloc().initWithFrame_(
-            NSMakeRect(box_w - _INNER - 40, ry, 40, 22)
-        )
-        alerts_on = self._config.get("notifications_enabled", True)
-        self._notif_switch.setState_(1 if alerts_on else 0)
-        self._notif_switch.setTarget_(self._delegate)
-        self._notif_switch.setAction_(
-            objc.selector(self._delegate.onAlertsToggle_, signature=b"v@:@")
-        )
-        box.addSubview_(self._notif_switch)
-
-        # Alert threshold
-        ry -= 32
-        self._threshold_label = _label("Alert threshold", _INNER, ry)
-        if not alerts_on:
-            self._threshold_label.setTextColor_(NSColor.tertiaryLabelColor())
-        box.addSubview_(self._threshold_label)
-        self._threshold_field = _input_field(box_w - _INNER - 80, ry, 40)
-        self._threshold_field.setStringValue_(str(self._config.get("warn_at_pct", 80)))
-        self._threshold_field.setEditable_(alerts_on)
-        self._threshold_field.setEnabled_(alerts_on)
-        self._threshold_field.setAlphaValue_(1.0 if alerts_on else 0.4)
-        self._threshold_field.setDelegate_(self._field_delegate)
-        box.addSubview_(self._threshold_field)
-        self._threshold_suffix = _label(
-            "%", box_w - _INNER - 35, ry + 2, w=20, size=11,
-            color=NSColor.secondaryLabelColor() if alerts_on else NSColor.tertiaryLabelColor()
-        )
-        box.addSubview_(self._threshold_suffix)
-
-        # Validation hint for threshold
-        self._threshold_hint = _label(
-            "", _INNER, ry - 16, w=box_w - 2 * _INNER, h=14, size=10,
-            color=NSColor.systemRedColor()
-        )
-        self._threshold_hint.setHidden_(True)
-        box.addSubview_(self._threshold_hint)
-
-        y -= box_h + 26
-
-        # =================================================================
-        # Support
-        # =================================================================
-        content.addSubview_(_label("Support", _PAD, y, bold=True, size=14))
-        y -= 8
-        box_h = 58
-        box = _section_box(y - box_h, box_h)
-        content.addSubview_(box)
-
-        # Version + Check for Updates
-        ry = box_h - 24
-        self._version_label = _label(f"Version {__version__}", _INNER, ry)
-        box.addSubview_(self._version_label)
-
-        self._update_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(box_w - _INNER - 150, ry - 3, 150, 25)
-        )
-        self._update_btn.setTitle_("Check for Updates")
-        self._update_btn.setBezelStyle_(NSBezelStyleRounded)
-        self._update_btn.setTarget_(self._delegate)
-        self._update_btn.setAction_(objc.selector(self._delegate.onUpdate_, signature=b"v@:@"))
-        box.addSubview_(self._update_btn)
-
-        # Status text + View Logs
-        ry -= 24
-        self._update_status = _label("", _INNER, ry, w=180, h=15, size=11,
-                                      color=NSColor.secondaryLabelColor())
-        box.addSubview_(self._update_status)
-
-        self._logs_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(box_w - _INNER - 90, ry - 2, 90, 22)
-        )
-        self._logs_btn.setTitle_("View Logs")
-        self._logs_btn.setBezelStyle_(NSBezelStyleRounded)
-        self._logs_btn.setTarget_(self._delegate)
-        self._logs_btn.setAction_(objc.selector(self._delegate.onViewLogs_, signature=b"v@:@"))
-        box.addSubview_(self._logs_btn)
-
-        # =================================================================
-        # Footer
-        # =================================================================
-        footer = _label(
-            "Settings are saved when this window is closed",
-            0, 12, w=_W, h=16, size=11,
-            color=NSColor.tertiaryLabelColor()
-        )
-        footer.setAlignment_(NSCenterTextAlignment)
-        content.addSubview_(footer)
-
-    def _validate_fields(self) -> None:
-        """Live validation feedback for numeric input fields."""
-        # Refresh interval validation
-        raw = str(self._refresh_field.stringValue()).strip()
-        if raw:
-            try:
-                val = int(raw)
-                if val < 10:
-                    self._refresh_hint.setStringValue_("Minimum is 10 seconds")
-                    self._refresh_hint.setHidden_(False)
-                    self._refresh_field.setTextColor_(NSColor.systemRedColor())
-                elif val > 3600:
-                    self._refresh_hint.setStringValue_("Maximum is 3600 seconds")
-                    self._refresh_hint.setHidden_(False)
-                    self._refresh_field.setTextColor_(NSColor.systemRedColor())
-                else:
-                    self._refresh_hint.setHidden_(True)
-                    self._refresh_field.setTextColor_(NSColor.controlTextColor())
-            except ValueError:
-                self._refresh_hint.setStringValue_("Enter a number")
-                self._refresh_hint.setHidden_(False)
-                self._refresh_field.setTextColor_(NSColor.systemRedColor())
-        else:
-            self._refresh_hint.setHidden_(True)
-            self._refresh_field.setTextColor_(NSColor.controlTextColor())
-
-        # Threshold validation
-        raw = str(self._threshold_field.stringValue()).strip()
-        if raw:
-            try:
-                val = int(raw)
-                if val < 1 or val > 100:
-                    self._threshold_hint.setStringValue_("Enter 1\u2013100")
-                    self._threshold_hint.setHidden_(False)
-                    self._threshold_field.setTextColor_(NSColor.systemRedColor())
-                else:
-                    self._threshold_hint.setHidden_(True)
-                    self._threshold_field.setTextColor_(NSColor.controlTextColor())
-            except ValueError:
-                self._threshold_hint.setStringValue_("Enter a number")
-                self._threshold_hint.setHidden_(False)
-                self._threshold_field.setTextColor_(NSColor.systemRedColor())
-        else:
-            self._threshold_hint.setHidden_(True)
-            self._threshold_field.setTextColor_(NSColor.controlTextColor())
+    def _reset_to_defaults(self) -> None:
+        self._auto_refresh_switch.setState_(1)
+        self._current_unit = "sec"
+        self._unit_popup.selectItemWithTitle_("sec")
+        self._refresh_field.setStringValue_(str(REFRESH_INTERVAL_SEC))
+        self._refresh_field.setEditable_(True)
+        self._refresh_field.setEnabled_(True)
+        self._unit_popup.setEnabled_(True)
 
     def _save_and_close(self) -> None:
         cfg = self._config
 
-        # Plan tier
-        selected = self._tier_popup.titleOfSelectedItem()
-        for key, display in PLAN_TIERS:
-            if display == selected:
-                cfg["plan_tier"] = key
-                break
-
         # Auto refresh
         cfg["auto_refresh"] = bool(self._auto_refresh_switch.state())
 
-        # Refresh interval (clamp to valid range)
+        # Refresh interval (clamp to valid range, convert units)
         try:
-            val = int(self._refresh_field.stringValue().strip())
-            cfg["refresh_interval_sec"] = max(10, min(3600, val))
-        except ValueError:
-            pass
-
-        # Notifications
-        cfg["notifications_enabled"] = bool(self._notif_switch.state())
-
-        # Warning threshold (clamp to valid range)
-        try:
-            val = int(self._threshold_field.stringValue().strip())
-            cfg["warn_at_pct"] = max(1, min(100, val))
+            raw = int(self._refresh_field.stringValue().strip())
+            if self._current_unit == "min":
+                raw = raw * 60
+            cfg["refresh_interval_sec"] = max(10, min(3600, raw))
         except ValueError:
             pass
 

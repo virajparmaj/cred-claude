@@ -13,7 +13,7 @@ from pathlib import Path
 
 import objc
 import rumps
-from AppKit import NSApplication, NSImage, NSObject
+from AppKit import NSApplication, NSBundle, NSImage, NSObject
 from Foundation import NSProcessInfo
 
 _ICON_PATH = Path(__file__).parent.parent / "claude_monitor_logo.png"
@@ -75,6 +75,12 @@ class _MenuDelegate(NSObject):
 
 class CredClaude(rumps.App):
     def __init__(self) -> None:
+        # Patch bundle name so Stage Manager/window tabs show "CredClaude" not "Python"
+        _info = NSBundle.mainBundle().infoDictionary()
+        if _info is not None:
+            _info["CFBundleName"] = "CredClaude"
+            _info["CFBundleDisplayName"] = "CredClaude"
+
         icon = str(_ICON_PATH) if _ICON_PATH.exists() else None
         super().__init__("CredClaude", title=None, icon=icon, template=False, quit_button=None)
 
@@ -91,11 +97,6 @@ class CredClaude(rumps.App):
 
         # Track last refresh time for menu-open staleness gate
         self._last_refresh_time = 0.0
-
-        # First-run wizard if no config exists yet
-        if not CONFIG_PATH.exists():
-            self._first_run_setup()
-            save_config(self.config)
 
         # Startup cleanup
         cleanup_old_warn_locks()
@@ -127,24 +128,6 @@ class CredClaude(rumps.App):
 
         rumps.Timer(self._check_notifications, NOTIF_CHECK_INTERVAL_SEC).start()
         logger.info("CredClaude started (v%s)", __version__)
-
-    # ------------------------------------------------------------------
-    # First-run setup
-    # ------------------------------------------------------------------
-    def _first_run_setup(self) -> None:
-        r = rumps.Window(
-            message=(
-                "Welcome to CredClaude!\n\n"
-                "What Claude Code plan are you on?\n"
-                "Enter: pro, max_5x, or max_20x"
-            ),
-            title="CredClaude — Setup",
-            default_text="pro",
-            ok="Done",
-            cancel="Skip",
-        ).run()
-        if r.clicked and r.text.strip().lower() in ("pro", "max_5x", "max_20x"):
-            self.config["plan_tier"] = r.text.strip().lower()
 
     # ------------------------------------------------------------------
     # Display update
@@ -256,7 +239,15 @@ class CredClaude(rumps.App):
 
     def _show_settings(self, _sender) -> None:
         from credclaude.settings import SettingsWindow
-        SettingsWindow.show(self.config, self._on_settings_saved)
+        last = getattr(self, "_last_limit", None)
+        data_source = "OAuth (Live)"
+        if last is not None:
+            src = last.source or ""
+            if "unavailable" in src:
+                data_source = "OAuth (Unavailable)"
+            elif "estimated" in src:
+                data_source = "Estimated"
+        SettingsWindow.show(self.config, self._on_settings_saved, data_source=data_source)
 
     def _on_settings_saved(self, cfg: dict) -> None:
         old_interval = self.config.get("refresh_interval_sec", REFRESH_INTERVAL_SEC)
