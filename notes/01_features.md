@@ -19,8 +19,9 @@ Catalog implemented and missing capabilities with direct code evidence.
 - **Install/uninstall** with `.app` bundle build and launchd registration (`install.sh`, `build_app.sh`, `uninstall.sh`).
 - **Notifications toggle** in settings UI — fully implemented.
 - **Externalized pricing** to `~/.credclaude/pricing.json` with staleness check.
+- **Automatic OAuth token refresh**: proactive refresh when token expires within 10 minutes; silent reactive refresh on HTTP 401 before entering cooldown (`credclaude/limit_providers.py`).
 - **Plan tier estimator** fallback with LOW-confidence community estimates when OAuth is unavailable.
-- **Graceful degradation**: OAuth → stale cache → disk snapshot → estimator → offline.
+- **Graceful degradation**: OAuth (with auto-refresh) → stale cache → disk snapshot → estimator → offline.
 
 ## Inferred / proposed
 - [Not found in repository] **Not implemented**: Historical trend view (weekly/monthly charts) and CSV export.

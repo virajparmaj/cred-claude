@@ -124,9 +124,23 @@ def _make_api_response(utilization: float = 0.84, resets_in_hours: float = 1.5) 
     }).encode()
 
 
-def _make_keychain_output(token: str = "sk-ant-oat01-testtoken") -> str:
-    """Build a fake Keychain JSON blob as returned by security."""
-    return json.dumps({"claudeAiOauth": {"accessToken": token}})
+def _make_keychain_output(
+    token: str = "sk-ant-oat01-testtoken",
+    refresh_token: str | None = None,
+    expires_in_sec: float | None = None,
+) -> str:
+    """Build a fake Keychain JSON blob as returned by security.
+
+    Includes refreshToken and expiresAt only when provided, so existing tests
+    (which pass neither) are unaffected by the proactive-refresh logic.
+    """
+    import time as _time
+    oauth: dict = {"accessToken": token}
+    if refresh_token is not None:
+        oauth["refreshToken"] = refresh_token
+    if expires_in_sec is not None:
+        oauth["expiresAt"] = int((_time.time() + expires_in_sec) * 1000)
+    return json.dumps({"claudeAiOauth": oauth})
 
 
 class TestOfficialLimitProvider:
@@ -510,13 +524,19 @@ class TestTokenExpired:
         assert "claude auth login" in info.error
 
     def test_token_expiry_cooldown_skips_repeat_fetches(self, tmp_path):
-        """Repeated calls during token-expiry cooldown should not hit Keychain/API."""
+        """Repeated calls during token-expiry cooldown should not hit Keychain/API.
+
+        The first get_limit_info() call makes 2 subprocess calls (token read +
+        silent-refresh attempt) and 1 urlopen call (the 401). After the cooldown
+        is set, the second call hits neither subprocess nor urlopen.
+        """
         import urllib.error
 
         provider = OfficialLimitProvider()
 
         mock_proc = MagicMock()
         mock_proc.returncode = 0
+        # No refreshToken in keychain → silent refresh returns None
         mock_proc.stdout = _make_keychain_output()
 
         def raise_401(*args, **kwargs):
@@ -540,7 +560,9 @@ class TestTokenExpired:
         assert "claude auth login" in second.error
         assert first.state == ProviderState.OFFLINE
         assert second.state == ProviderState.OFFLINE
-        assert proc_mock.call_count == 1
+        # 2 subprocess calls on the first get_limit_info: _get_token() + _try_silent_refresh()
+        # 0 calls on the second (cooldown guard is active)
+        assert proc_mock.call_count == 2
         assert url_mock.call_count == 1
 
 
@@ -800,5 +822,171 @@ class TestSnapshotStartup:
         assert result is True
 
 
+# ---------------------------------------------------------------------------
+# OAuth auto-refresh
+# ---------------------------------------------------------------------------
+class TestOAuthAutoRefresh:
+    """Tests for proactive and reactive OAuth token refresh."""
+
+    _REFRESH_RESPONSE = json.dumps({
+        "access_token": "sk-ant-oat01-newtoken",
+        "refresh_token": "sk-ant-ort01-newrefresh",
+        "expires_in": 28800,
+        "token_type": "Bearer",
+    }).encode()
+
+    def _mock_urlopen_sequence(self, *responses):
+        """Return a side_effect list for urlopen that yields responses in order."""
+        mocks = []
+        for r in responses:
+            if isinstance(r, BaseException):
+                mocks.append(r)
+            else:
+                m = MagicMock()
+                m.read.return_value = r
+                m.__enter__ = lambda s: s
+                m.__exit__ = MagicMock(return_value=False)
+                mocks.append(m)
+        return mocks
+
+    def test_proactive_refresh_when_token_near_expiry(self):
+        """Token expiring in <10 min triggers a proactive refresh before the API call."""
+        provider = OfficialLimitProvider()
+
+        # Keychain returns token expiring in 5 min (< threshold of 10 min)
+        stale_kc = _make_keychain_output(
+            token="sk-ant-oat01-old",
+            refresh_token="sk-ant-ort01-refresh",
+            expires_in_sec=300,  # 5 min
+        )
+        # Write-back call (add-generic-password) also returns success
+        kc_read_mock = MagicMock(returncode=0, stdout=stale_kc)
+        kc_write_mock = MagicMock(returncode=0, stdout="")
+
+        usage_body = json.dumps({
+            "five_hour": {"utilization": 0.4, "resets_at": "2099-01-01T00:00:00Z"}
+        }).encode()
+
+        with patch("subprocess.run", side_effect=[kc_read_mock, kc_write_mock]):
+            with patch("urllib.request.urlopen",
+                       side_effect=self._mock_urlopen_sequence(
+                           self._REFRESH_RESPONSE, usage_body)):
+                info = provider.get_limit_info()
+
+        assert info.utilization_pct == pytest.approx(40.0)
+        assert info.state == ProviderState.HEALTHY
+
+    def test_proactive_refresh_failure_falls_back_to_existing_token(self):
+        """If proactive refresh fails, the existing access token is used."""
+        import urllib.error
+        provider = OfficialLimitProvider()
+
+        stale_kc = _make_keychain_output(
+            token="sk-ant-oat01-existing",
+            refresh_token="sk-ant-ort01-refresh",
+            expires_in_sec=300,
+        )
+        kc_mock = MagicMock(returncode=0, stdout=stale_kc)
+        usage_body = json.dumps({
+            "five_hour": {"utilization": 0.5, "resets_at": "2099-01-01T00:00:00Z"}
+        }).encode()
+
+        def refresh_fails(req, timeout=None):
+            if _TOKEN_REFRESH_URL in req.full_url:
+                raise urllib.error.HTTPError(
+                    url=_TOKEN_REFRESH_URL, code=429, msg="Rate limited", hdrs=None, fp=None
+                )
+            # usage API call succeeds
+            m = MagicMock()
+            m.read.return_value = usage_body
+            m.__enter__ = lambda s: s
+            m.__exit__ = MagicMock(return_value=False)
+            return m
+
+        with patch("subprocess.run", return_value=kc_mock):
+            with patch("urllib.request.urlopen", side_effect=refresh_fails):
+                info = provider.get_limit_info()
+
+        assert info.utilization_pct == pytest.approx(50.0)
+        assert info.state == ProviderState.HEALTHY
+
+    def test_silent_refresh_after_401_retries_successfully(self, tmp_path):
+        """On 401, silent refresh succeeds → usage is fetched without cooldown."""
+        import urllib.error
+        provider = OfficialLimitProvider()
+
+        # First keychain read (for _get_token): no refreshToken → 401 happens
+        # Second keychain read (for _try_silent_refresh): has refreshToken
+        kc_no_refresh = MagicMock(returncode=0, stdout=_make_keychain_output())
+        kc_with_refresh = MagicMock(
+            returncode=0,
+            stdout=_make_keychain_output(
+                refresh_token="sk-ant-ort01-refresh", expires_in_sec=7200
+            ),
+        )
+        kc_write = MagicMock(returncode=0, stdout="")
+
+        usage_body = json.dumps({
+            "five_hour": {"utilization": 0.6, "resets_at": "2099-01-01T00:00:00Z"}
+        }).encode()
+
+        def raise_401_then_succeed(req, timeout=None):
+            if _TOKEN_REFRESH_URL in str(getattr(req, "full_url", "")):
+                m = MagicMock()
+                m.read.return_value = self._REFRESH_RESPONSE
+                m.__enter__ = lambda s: s
+                m.__exit__ = MagicMock(return_value=False)
+                return m
+            if not hasattr(raise_401_then_succeed, "_called"):
+                raise_401_then_succeed._called = True
+                err = urllib.error.HTTPError(
+                    url=_OAUTH_URL, code=401, msg="Unauthorized", hdrs=None, fp=MagicMock()
+                )
+                err.read = lambda: json.dumps({"error": {"message": "Token expired."}}).encode()
+                raise err
+            m = MagicMock()
+            m.read.return_value = usage_body
+            m.__enter__ = lambda s: s
+            m.__exit__ = MagicMock(return_value=False)
+            return m
+
+        snapshot_path = tmp_path / "nonexistent.json"
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            with patch("subprocess.run",
+                       side_effect=[kc_no_refresh, kc_with_refresh, kc_write]):
+                with patch("urllib.request.urlopen", side_effect=raise_401_then_succeed):
+                    info = provider.get_limit_info()
+
+        assert info.utilization_pct == pytest.approx(60.0)
+        assert info.state == ProviderState.HEALTHY
+        assert info.error is None
+        # No cooldown was set
+        assert provider._retry_after is None
+
+    def test_silent_refresh_failure_after_401_sets_cooldown(self, tmp_path):
+        """If silent refresh also fails after 401, the cooldown is applied."""
+        import urllib.error
+        provider = OfficialLimitProvider()
+
+        kc_mock = MagicMock(returncode=0, stdout=_make_keychain_output())
+
+        def always_raise_401(*args, **kwargs):
+            err = urllib.error.HTTPError(
+                url=_OAUTH_URL, code=401, msg="Unauthorized", hdrs=None, fp=MagicMock()
+            )
+            err.read = lambda: json.dumps({"error": {"message": "Token expired."}}).encode()
+            raise err
+
+        snapshot_path = tmp_path / "nonexistent.json"
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            with patch("subprocess.run", return_value=kc_mock):
+                with patch("urllib.request.urlopen", side_effect=always_raise_401):
+                    info = provider.get_limit_info()
+
+        assert "claude auth login" in info.error
+        assert provider._retry_after is not None
+
+
 # Import needed in test scope
 _OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
+_TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"

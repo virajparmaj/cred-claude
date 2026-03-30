@@ -60,7 +60,7 @@ Full audit completed. Most original issues have been resolved during the refacto
 
 ### Architectural Notes
 - **App tied to source repo path** — The `.app` bundle's launcher script has the repo path baked in at build time. If the source repo moves, the user must re-run `install.sh`. The launcher now shows an error dialog instead of failing silently.
-- **OAuth token refresh is external** — CredClaude cannot refresh the Keychain token itself. When the token expires, the user must run `claude auth login`. The app shows this guidance in the menu and backs off for 5 minutes to avoid hammering the API.
+- **OAuth token refresh is automatic** — CredClaude refreshes the token proactively (10 min before expiry) and reactively (on 401). Manual `claude auth login` is only needed when the refresh token itself expires (typically weeks/months).
 - **Weekly cap not tracked** — Anthropic's weekly usage cap is not exposed by the OAuth API. A note is shown in the UI acknowledging this limitation.
 
 ---

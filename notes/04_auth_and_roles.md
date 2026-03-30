@@ -6,30 +6,37 @@ This is a single-user local macOS menu bar app. There is no authentication layer
 
 ### OAuth Token Dependency
 
-- The app reads an OAuth access token from the **macOS Keychain** (service: `Claude Code-credentials`).
-- This token is set by Claude Code when the user runs `claude auth login`.
-- The app **never writes** to the Keychain — it only reads the token placed there by Claude Code.
-- The token is used to call `https://api.anthropic.com/api/oauth/usage` to fetch real session utilization data.
+- The app reads the OAuth credential JSON from the **macOS Keychain** (service: `Claude Code-credentials`).
+- This entry is written by Claude Code when the user runs `claude auth login`.
+- The Keychain JSON contains: `accessToken`, `refreshToken`, `expiresAt` (ms), `scopes`, `subscriptionType`, `rateLimitTier`.
+- The `accessToken` is used to call `https://api.anthropic.com/api/oauth/usage` to fetch real session utilization data.
 
 ### Token Lifecycle
 
 1. **Valid token**: App fetches live usage data (utilization %, reset time) from the OAuth API.
-2. **Expired token (HTTP 401)**: App enters a 5-minute cooldown. The menu shows the last known usage data marked "(stale)" and displays: `"Token expired — run: claude auth login"`.
-3. **Rate limited (HTTP 429)**: App backs off exponentially (120s → 300s → 600s). Last known data is shown during backoff.
-4. **No token (fresh install)**: App falls back to the Estimator provider, which shows plan-tier budget estimates with LOW confidence. The menu prompts the user to run `claude auth login`.
+2. **Token near expiry (proactive)**: If `expiresAt` is within 10 minutes, the app calls the OAuth refresh endpoint before making the usage API call. No user action needed.
+3. **Expired token (HTTP 401)**: App attempts a silent refresh using the stored `refreshToken`. If successful, retries the usage fetch immediately. If refresh also fails, enters a 5-minute cooldown and shows `"Token expired — run: claude auth login"`.
+4. **Rate limited (HTTP 429)**: App backs off exponentially (120s → 300s → 600s). Last known data is shown during backoff.
+5. **No token (fresh install)**: App falls back to the Estimator provider, which shows plan-tier budget estimates with LOW confidence. The menu prompts the user to run `claude auth login`.
 
-### Re-authentication
+### Token Refresh Details
 
-If the app shows "Token expired", the user must:
+- **Refresh endpoint**: `POST https://platform.claude.com/v1/oauth/token`
+- **Client ID**: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (public client, no secret needed)
+- **Parameters**: `grant_type=refresh_token`, `refresh_token=<token>`, `client_id=<id>`
+- After a successful refresh, the Keychain entry is updated with the new `accessToken`, `refreshToken`, and `expiresAt`.
+- The `refreshToken` itself expires on Anthropic's server side (typically weeks/months). Only when it expires will the user need to run `claude auth login` again.
+
+### Re-authentication (when truly needed)
+
+If the refresh token itself has expired, the app shows "Token expired" and the user must:
 
 1. Open a terminal
 2. Run `claude auth login`
 3. Click "Refresh Now" in the menu bar (or wait for the next automatic refresh)
 
-The app cannot refresh the token itself — only Claude Code can do that.
-
 ### Security Notes
 
-- No secrets are stored by this app. The OAuth token is managed entirely by Claude Code via macOS Keychain.
+- The app reads and writes the OAuth credential entry in the macOS Keychain (service: `Claude Code-credentials`).
+- It writes only on successful token refresh, preserving all existing fields.
 - All API calls use HTTPS with Bearer token authentication.
-- The token is never logged or persisted to disk by this app.

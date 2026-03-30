@@ -22,7 +22,7 @@ Define a practical, repo-specific roadmap for continued improvement of this loca
 - `install.sh` builds, copies, and registers launchd login item
 - Version single-sourced from `credclaude/__init__.py`
 - Warn lock file cleanup on startup
-- Local retry guard in `OfficialLimitProvider`: exponential backoff on 429, 5-min cooldown on 401; "Refresh Now" bypasses guard via `force_refresh()`
+- Local retry guard in `OfficialLimitProvider`: exponential backoff on 429; on 401 — silent token refresh attempted first, 5-min cooldown only if refresh fails; proactive refresh 10 min before expiry; "Refresh Now" bypasses guard via `force_refresh()`
 
 ## Near-term improvements
 - Add "Open logs folder" menu item for easier support

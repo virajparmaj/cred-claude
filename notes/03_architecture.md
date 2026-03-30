@@ -21,7 +21,7 @@ Explain the technical architecture, runtime boundaries, and data flow in this re
   - `notifications.py` — macOS `osascript` notification dispatch, lock-file dedup.
   - `settings.py` — native macOS settings window built with AppKit/objc; replaces the old sequential rumps dialog chain.
 - **Background scheduling**: two in-process `rumps` timers — refresh (60s) + startup one-shot (5s delay).
-- **OAuth data source**: `https://api.anthropic.com/api/oauth/usage` — reads token from macOS Keychain (service: `Claude Code-credentials`).
+- **OAuth data source**: `https://api.anthropic.com/api/oauth/usage` — reads/writes token from macOS Keychain (service: `Claude Code-credentials`). Token refresh via `POST https://platform.claude.com/v1/oauth/token` (public client `9d1c250a-e61b-44d9-88ed-5944d1962f5e`); Keychain entry updated on successful refresh.
 - **JSONL data source**: `~/.claude/projects/*/*.jsonl` and subagent logs — read-only.
 - **State management**: local JSON config + in-memory cache + disk snapshot (`~/.credclaude/snapshot.json`).
 - **Notification integration**: macOS `osascript` subprocess (`credclaude/notifications.py`).
@@ -36,7 +36,7 @@ Explain the technical architecture, runtime boundaries, and data flow in this re
 - **Limit data flow**: OAuth API (utilization %, reset time) → in-memory cache → disk snapshot. On failure: stale cache → snapshot → estimator → offline.
 - **Cost data flow**: read JSONL → filter assistant entries by date → compute costs via pricing table → aggregate by model → update menu UI.
 - **Resilience**: narrowed exception catches with `logger.debug()` on all skip paths; single `_update()` wrapper prevents provider failure from crashing the app.
-- **Rate limiting**: refresh every 60s (60 calls/hour); startup deferred 5s. `OfficialLimitProvider` tracks a local retry guard (`_retry_after`, `_retry_reason`, `_rate_limit_step`). On 429: exponential backoff via `RATE_LIMIT_BACKOFF_STEPS_SEC = (120, 300, 600)` s. On 401 (token expired): fixed 5-min cooldown (`TOKEN_EXPIRED_COOLDOWN_SEC = 300`). `force_refresh()` (triggered by "Refresh Now") clears `_retry_after`/`_retry_reason` to bypass the local guard but preserves `_rate_limit_step`.
+- **Rate limiting**: refresh every 60s (60 calls/hour); startup deferred 5s. `OfficialLimitProvider` tracks a local retry guard (`_retry_after`, `_retry_reason`, `_rate_limit_step`). On 429: exponential backoff via `RATE_LIMIT_BACKOFF_STEPS_SEC = (120, 300, 600)` s. On 401 (token expired): app first attempts a silent refresh via `_try_silent_refresh()` → `_refresh_oauth_token()`; if successful, retries the usage fetch immediately. Only if the silent refresh fails does it enter the fixed 5-min cooldown (`TOKEN_EXPIRED_COOLDOWN_SEC = 300`). Proactive refresh also runs before the usage call if the token's `expiresAt` is within 10 minutes (`_PROACTIVE_REFRESH_THRESHOLD_SEC = 600`). `force_refresh()` (triggered by "Refresh Now") clears `_retry_after`/`_retry_reason` to bypass the local guard but preserves `_rate_limit_step`.
 - **Billing period** logic handles month boundaries with day clamping (`credclaude/billing.py`).
 
 ```text

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import datetime
+import getpass
 import json
 import logging
 import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 
@@ -39,6 +42,9 @@ PLAN_ESTIMATES: dict[str, dict] = {
 _OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
 _OAUTH_BETA = "oauth-2025-04-20"
 _KEYCHAIN_SERVICE = "Claude Code-credentials"
+_TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_PROACTIVE_REFRESH_THRESHOLD_SEC = 600  # Refresh proactively if token expires within 10 min
 
 
 def _now() -> datetime.datetime:
@@ -156,10 +162,10 @@ class OfficialLimitProvider(LimitProvider):
         self._rate_limit_step = 0
 
     # ------------------------------------------------------------------
-    # Token extraction
+    # Token extraction and refresh
     # ------------------------------------------------------------------
-    def _get_token(self) -> str:
-        """Extract OAuth access token from macOS Keychain."""
+    def _get_keychain_raw(self) -> tuple[str, dict | None]:
+        """Read raw keychain entry. Returns (raw_str, parsed_dict_or_None)."""
         result = subprocess.run(
             ["security", "find-generic-password", "-s", _KEYCHAIN_SERVICE, "-w"],
             capture_output=True, text=True, timeout=10,
@@ -170,14 +176,104 @@ class OfficialLimitProvider(LimitProvider):
             )
         raw = result.stdout.strip()
         try:
-            # Token is stored as JSON: {"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}
-            data = json.loads(raw)
-            return data["claudeAiOauth"]["accessToken"]
-        except (json.JSONDecodeError, KeyError):
+            return raw, json.loads(raw)
+        except json.JSONDecodeError:
+            return raw, None
+
+    def _get_token(self) -> str:
+        """Extract OAuth access token from macOS Keychain, refreshing proactively if near expiry."""
+        raw, data = self._get_keychain_raw()
+        try:
+            if data is None:
+                raise KeyError("not JSON")
+            oauth = data["claudeAiOauth"]
+            access_token = oauth["accessToken"]
+
+            # Proactive refresh: if token expires soon and we have a refresh token, refresh now
+            expires_at_ms = oauth.get("expiresAt")
+            refresh_token = oauth.get("refreshToken")
+            if expires_at_ms and refresh_token:
+                expires_in_sec = (expires_at_ms / 1000) - time.time()
+                if expires_in_sec < _PROACTIVE_REFRESH_THRESHOLD_SEC:
+                    logger.info(
+                        "Token expires in %.0fs — proactively refreshing",
+                        max(0.0, expires_in_sec),
+                    )
+                    try:
+                        return self._refresh_oauth_token(refresh_token, data)
+                    except Exception as e:
+                        logger.warning("Proactive refresh failed (%s) — using existing token", e)
+
+            return access_token
+        except (KeyError, TypeError):
             # Might already be a raw token (future-proofing)
             if raw.startswith("sk-"):
                 return raw
             raise RuntimeError(f"Unexpected Keychain credential format: {raw[:40]}...")
+
+    def _refresh_oauth_token(self, refresh_token: str, keychain_data: dict) -> str:
+        """Call the OAuth refresh endpoint, update the Keychain, and return the new access token."""
+        body = urllib.parse.urlencode({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": _OAUTH_CLIENT_ID,
+        }).encode()
+
+        req = urllib.request.Request(
+            _TOKEN_REFRESH_URL,
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"Token refresh HTTP {e.code}: {e.reason}")
+
+        new_access = resp_data.get("access_token")
+        if not new_access:
+            raise RuntimeError(f"Token refresh response missing access_token: {resp_data}")
+
+        # Write updated tokens back to Keychain, preserving all existing fields
+        updated_oauth = {**keychain_data.get("claudeAiOauth", {})}
+        updated_oauth["accessToken"] = new_access
+        if "refresh_token" in resp_data:
+            updated_oauth["refreshToken"] = resp_data["refresh_token"]
+        if "expires_in" in resp_data:
+            updated_oauth["expiresAt"] = int((time.time() + resp_data["expires_in"]) * 1000)
+        updated = {**keychain_data, "claudeAiOauth": updated_oauth}
+
+        write = subprocess.run(
+            [
+                "security", "add-generic-password",
+                "-U",  # update if exists
+                "-s", _KEYCHAIN_SERVICE,
+                "-a", getpass.getuser(),
+                "-w", json.dumps(updated),
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        if write.returncode != 0:
+            logger.warning("Keychain write failed (%d): %s", write.returncode, write.stderr.strip())
+        else:
+            logger.info("Keychain updated with refreshed OAuth tokens")
+
+        return new_access
+
+    def _try_silent_refresh(self) -> str | None:
+        """Try to silently refresh the OAuth token. Returns new access token or None on failure."""
+        try:
+            _, data = self._get_keychain_raw()
+            if data is None:
+                return None
+            refresh_token = data.get("claudeAiOauth", {}).get("refreshToken")
+            if not refresh_token:
+                return None
+            return self._refresh_oauth_token(refresh_token, data)
+        except Exception as e:
+            logger.warning("Silent token refresh failed: %s", e)
+            return None
 
     # ------------------------------------------------------------------
     # API call
@@ -294,6 +390,42 @@ class OfficialLimitProvider(LimitProvider):
         logger.info("Force refresh: cleared cache")
         return self.get_limit_info()
 
+    def _parse_usage_data(self, data: dict) -> LimitInfo:
+        """Parse an OAuth API usage response into a LimitInfo."""
+        five_hour = data.get("five_hour", {})
+        utilization = five_hour.get("utilization")  # fraction or percent
+        resets_at_str = five_hour.get("resets_at")
+
+        if utilization is None:
+            raise RuntimeError(f"Unexpected API response shape: {list(data.keys())}")
+
+        resets_at: datetime.datetime | None = None
+        if resets_at_str:
+            resets_at = datetime.datetime.fromisoformat(
+                resets_at_str.replace("Z", "+00:00")
+            ).astimezone()
+
+        return LimitInfo(
+            source="official (claude.ai)",
+            plan_tier="unknown",
+            daily_budget_usd=0.0,
+            confidence=Confidence.HIGH,
+            state=ProviderState.HEALTHY,
+            last_sync=_now(),
+            utilization_pct=_normalize_utilization(utilization),
+            resets_at=resets_at,
+            weekly_cap_note="Weekly cap may apply — check claude.ai for details",
+            error=None,
+        )
+
+    def _store_usage(self, info: LimitInfo) -> None:
+        """Cache a successful LimitInfo result and persist it to disk."""
+        self._cached = info
+        self._cache_time = _now()
+        self._clear_retry_guard()
+        _save_snapshot(info)
+        logger.info("OAuth usage fetched: %.1f%% used", info.utilization_pct)
+
     def get_limit_info(self) -> LimitInfo:
         # Return cached data if still fresh
         if self._cache_valid() and self._cached is not None:
@@ -310,39 +442,8 @@ class OfficialLimitProvider(LimitProvider):
         try:
             token = self._get_token()
             data = self._fetch_usage(token)
-
-            five_hour = data.get("five_hour", {})
-            utilization = five_hour.get("utilization")  # fraction or percent
-            resets_at_str = five_hour.get("resets_at")
-
-            if utilization is None:
-                raise RuntimeError(f"Unexpected API response shape: {list(data.keys())}")
-
-            resets_at: datetime.datetime | None = None
-            if resets_at_str:
-                resets_at = datetime.datetime.fromisoformat(
-                    resets_at_str.replace("Z", "+00:00")
-                ).astimezone()
-
-            now = _now()
-            info = LimitInfo(
-                source="official (claude.ai)",
-                plan_tier="unknown",
-                daily_budget_usd=0.0,
-                confidence=Confidence.HIGH,
-                state=ProviderState.HEALTHY,
-                last_sync=now,
-                utilization_pct=_normalize_utilization(utilization),
-                resets_at=resets_at,
-                weekly_cap_note="Weekly cap may apply — check claude.ai for details",
-                error=None,
-            )
-
-            self._cached = info
-            self._cache_time = now
-            self._clear_retry_guard()
-            _save_snapshot(info)
-            logger.info("OAuth usage fetched: %.1f%% used", info.utilization_pct)
+            info = self._parse_usage_data(data)
+            self._store_usage(info)
             return info
 
         except _RateLimitError:
@@ -360,6 +461,18 @@ class OfficialLimitProvider(LimitProvider):
         except _TokenExpiredError as e:
             logger.info("OAuth token expired: %s", e)
             self._rate_limit_step = 0
+            # Try silent refresh before entering the cooldown period
+            new_token = self._try_silent_refresh()
+            if new_token:
+                logger.info("Token refreshed silently after 401 — retrying fetch")
+                try:
+                    data = self._fetch_usage(new_token)
+                    info = self._parse_usage_data(data)
+                    self._store_usage(info)
+                    return info
+                except Exception as retry_err:
+                    logger.warning("Retry after silent refresh failed: %s", retry_err)
+            # Refresh unavailable or failed — enter normal cooldown
             self._set_retry_guard(
                 self.TOKEN_EXPIRED_COOLDOWN_SEC,
                 "Token expired — run: claude auth login",
