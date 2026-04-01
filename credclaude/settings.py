@@ -159,6 +159,10 @@ class _Delegate(NSObject):
             sw._refresh_field.setEnabled_(enabled)
             sw._unit_popup.setEnabled_(enabled)
 
+    def onAutoReauthToggle_(self, sender):
+        # Toggle is persisted on window close; no immediate side effects needed.
+        _ = sender
+
     def onResetDefaults_(self, sender):
         sw = self.settings_window
         if sw:
@@ -376,15 +380,30 @@ class SettingsWindow:
         box.addSubview_(src_lbl)
 
         # =================================================================
-        # MONITORING section  (label y=478, box y=382 h=88)
+        # MONITORING section  (label y=478, box y=378 h=132)
         # =================================================================
         content.addSubview_(_section_label("Monitoring", _PAD, 478))
-        box = _section_box(382, 88)
+        box = _section_box(378, 132)
         content.addSubview_(box)
 
         auto_refresh_on = self._config.get("auto_refresh", True)
+        auto_reauth_on = self._config.get("auto_reauth_enabled", True)
 
-        # Row 2 — top: Auto-refresh toggle (local y=44..88)
+        # Row 3 — top: Auto re-authenticate toggle (local y=88..132)
+        box.addSubview_(_label("Auto re-authenticate", _INNER, 100))
+        self._auto_reauth_switch = NSSwitch.alloc().initWithFrame_(
+            NSMakeRect(box_w - _INNER - 40, 99, 40, 22)
+        )
+        self._auto_reauth_switch.setState_(1 if auto_reauth_on else 0)
+        self._auto_reauth_switch.setTarget_(self._delegate)
+        self._auto_reauth_switch.setAction_(
+            objc.selector(self._delegate.onAutoReauthToggle_, signature=b"v@:@")
+        )
+        box.addSubview_(self._auto_reauth_switch)
+
+        _separator(box, 88)
+
+        # Row 2 — middle: Auto-refresh toggle (local y=44..88)
         box.addSubview_(_label("Auto-refresh", _INNER, 56))
         self._auto_refresh_switch = NSSwitch.alloc().initWithFrame_(
             NSMakeRect(box_w - _INNER - 40, 55, 40, 22)
@@ -437,6 +456,7 @@ class SettingsWindow:
         )
 
     def _reset_to_defaults(self) -> None:
+        self._auto_reauth_switch.setState_(1)
         self._auto_refresh_switch.setState_(1)
         self._current_unit = "sec"
         self._unit_popup.selectItemWithTitle_("sec")
@@ -454,6 +474,7 @@ class SettingsWindow:
 
         # Auto refresh
         cfg["auto_refresh"] = bool(self._auto_refresh_switch.state())
+        cfg["auto_reauth_enabled"] = bool(self._auto_reauth_switch.state())
 
         # Refresh interval (clamp to valid range, convert units)
         try:

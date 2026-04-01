@@ -31,12 +31,14 @@ Click the menu bar icon to expand:
 
 ```
 Refresh
+Re-authenticate
 Settings
 ————————
 Quit
 ```
 
 The display refreshes automatically every 60 seconds (configurable in Settings) and also triggers when you open the menu.
+When auth expires, CredClaude can also auto-launch `claude auth login` in Terminal (enabled by default).
 
 ---
 
@@ -127,6 +129,8 @@ Config is stored at `~/.credclaude/config.json`:
 | `stale_threshold_minutes` | int | `30` | Minutes before data is considered stale |
 | `auto_refresh` | bool | `true` | Enable automatic refresh on the set interval |
 | `refresh_interval_sec` | int | `60` | Seconds between auto-refreshes (10–3600) |
+| `auto_reauth_enabled` | bool | `true` | Auto-launch `claude auth login` when auth expires |
+| `auto_reauth_cooldown_sec` | int | `1800` | Minimum seconds between auto re-auth launches |
 
 All settings are also editable from the menu bar → Settings.
 
@@ -166,13 +170,20 @@ pytest tests/ -v
 
 ## Authentication
 
-The app reads a Claude Code OAuth token from macOS Keychain to fetch live session usage. If the menu shows "Token expired":
+The app reads a Claude Code OAuth token from macOS Keychain to fetch live session usage.
+
+If auth expires, CredClaude can automatically open Terminal and run:
 
 ```bash
 claude auth login
 ```
 
-Then click **Refresh Now** in the menu bar. See `notes/04_auth_and_roles.md` for details.
+You can also trigger this manually from the menu bar with **Re-authenticate**.
+
+After Terminal opens, complete the browser approval flow, then click **Refresh** in the menu bar (or wait for the next automatic refresh).
+
+On first use, macOS may ask for permission to let CredClaude control Terminal. Granting that permission is required for automated launch.
+See `notes/04_auth_and_roles.md` for details.
 
 ## Known Limitations
 

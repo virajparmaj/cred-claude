@@ -39,6 +39,8 @@ DEFAULT_CONFIG: dict = {
     "stale_threshold_minutes": 30,
     "refresh_interval_sec": 60,
     "auto_refresh": True,
+    "auto_reauth_enabled": True,
+    "auto_reauth_cooldown_sec": 1800,
 }
 
 
@@ -76,6 +78,17 @@ def load_config() -> dict:
                 logger.warning("Invalid refresh_interval_sec '%s', resetting to default",
                                interval)
                 cfg["refresh_interval_sec"] = DEFAULT_CONFIG["refresh_interval_sec"]
+            if not isinstance(cfg.get("auto_refresh"), bool):
+                logger.warning("Invalid auto_refresh type, resetting to default")
+                cfg["auto_refresh"] = DEFAULT_CONFIG["auto_refresh"]
+            if not isinstance(cfg.get("auto_reauth_enabled"), bool):
+                logger.warning("Invalid auto_reauth_enabled type, resetting to default")
+                cfg["auto_reauth_enabled"] = DEFAULT_CONFIG["auto_reauth_enabled"]
+            cooldown = cfg.get("auto_reauth_cooldown_sec")
+            if not isinstance(cooldown, (int, float)) or cooldown < 30 or cooldown > 86400:
+                logger.warning("Invalid auto_reauth_cooldown_sec '%s', resetting to default",
+                               cooldown)
+                cfg["auto_reauth_cooldown_sec"] = DEFAULT_CONFIG["auto_reauth_cooldown_sec"]
             return cfg
         except Exception as e:
             logger.warning("Failed to load config, using defaults: %s", e)

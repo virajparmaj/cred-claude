@@ -124,6 +124,13 @@ def _make_api_response(utilization: float = 0.84, resets_in_hours: float = 1.5) 
     }).encode()
 
 
+def _near_future_resets_at_iso(hours: float = 2.0) -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(hours=hours)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _make_keychain_output(
     token: str = "sk-ant-oat01-testtoken",
     refresh_token: str | None = None,
@@ -219,6 +226,22 @@ class TestOfficialLimitProvider:
         # subprocess and urlopen each called only once
         assert mock_proc.call_count == 1
         assert mock_url.call_count == 1
+
+    def test_far_future_resets_at_from_api_is_ignored(self):
+        provider = OfficialLimitProvider()
+        body = json.dumps({
+            "five_hour": {
+                "utilization": 0.5,
+                "resets_at": "2098-12-31T18:00:00-06:00",
+            }
+        }).encode()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.utilization_pct == pytest.approx(50.0)
+        assert info.resets_at is None
 
     def test_keychain_failure_returns_offline(self):
         """Keychain lookup failure with no cache → OFFLINE state."""
@@ -659,6 +682,22 @@ class TestDiskSnapshot:
         assert loaded.state == ProviderState.HEALTHY
         assert "official" in loaded.source
 
+    def test_save_omits_invalid_far_future_resets_at(self, tmp_path):
+        snapshot_path = tmp_path / "last_usage.json"
+        far_future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=30)
+        info = LimitInfo(
+            source="official (claude.ai)",
+            utilization_pct=50.0,
+            resets_at=far_future,
+            last_sync=datetime.datetime.now(datetime.timezone.utc),
+        )
+
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            _save_snapshot(info)
+
+        data = json.loads(snapshot_path.read_text())
+        assert data["resets_at"] is None
+
     def test_expired_snapshot_discarded(self, tmp_path):
         """Snapshot with resets_at in the past is discarded."""
         snapshot_path = tmp_path / "last_usage.json"
@@ -706,6 +745,26 @@ class TestDiskSnapshot:
         assert info.utilization_pct == pytest.approx(42.0)
         assert "official" in info.source
         assert info.error is not None
+
+    def test_load_far_future_snapshot_clears_countdown_and_heals_file(self, tmp_path):
+        snapshot_path = tmp_path / "last_usage.json"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_path.write_text(json.dumps({
+            "utilization_pct": 42.0,
+            "resets_at": "2098-12-31T18:00:00-06:00",
+            "last_sync": now.isoformat(),
+            "source": "official (claude.ai)",
+            "saved_at": now.isoformat(),
+        }))
+
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            loaded = _load_snapshot()
+
+        assert loaded is not None
+        assert loaded.utilization_pct == pytest.approx(42.0)
+        assert loaded.resets_at is None
+        healed = json.loads(snapshot_path.read_text())
+        assert healed["resets_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -821,6 +880,26 @@ class TestSnapshotStartup:
 
         assert result is True
 
+    def test_far_future_snapshot_rejected_and_healed(self, tmp_path):
+        snapshot_path = tmp_path / "last_usage.json"
+        now = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_path.write_text(json.dumps({
+            "utilization_pct": 64.0,
+            "resets_at": "2098-12-31T18:00:00-06:00",
+            "last_sync": now.isoformat(),
+            "source": "official (claude.ai)",
+            "saved_at": now.isoformat(),
+        }))
+
+        provider = OfficialLimitProvider()
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            result = provider.try_snapshot_startup()
+
+        assert result is False
+        assert provider._cached is None
+        healed = json.loads(snapshot_path.read_text())
+        assert healed["resets_at"] is None
+
 
 # ---------------------------------------------------------------------------
 # OAuth auto-refresh
@@ -864,7 +943,7 @@ class TestOAuthAutoRefresh:
         kc_write_mock = MagicMock(returncode=0, stdout="")
 
         usage_body = json.dumps({
-            "five_hour": {"utilization": 0.4, "resets_at": "2099-01-01T00:00:00Z"}
+            "five_hour": {"utilization": 0.4, "resets_at": _near_future_resets_at_iso()}
         }).encode()
 
         with patch("subprocess.run", side_effect=[kc_read_mock, kc_write_mock]):
@@ -888,7 +967,7 @@ class TestOAuthAutoRefresh:
         )
         kc_mock = MagicMock(returncode=0, stdout=stale_kc)
         usage_body = json.dumps({
-            "five_hour": {"utilization": 0.5, "resets_at": "2099-01-01T00:00:00Z"}
+            "five_hour": {"utilization": 0.5, "resets_at": _near_future_resets_at_iso()}
         }).encode()
 
         def refresh_fails(req, timeout=None):
@@ -927,7 +1006,7 @@ class TestOAuthAutoRefresh:
         kc_write = MagicMock(returncode=0, stdout="")
 
         usage_body = json.dumps({
-            "five_hour": {"utilization": 0.6, "resets_at": "2099-01-01T00:00:00Z"}
+            "five_hour": {"utilization": 0.6, "resets_at": _near_future_resets_at_iso()}
         }).encode()
 
         def raise_401_then_succeed(req, timeout=None):

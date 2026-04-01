@@ -19,6 +19,7 @@ from Foundation import NSProcessInfo
 _ICON_PATH = Path(__file__).parent.parent / "claude_monitor_logo.png"
 
 from credclaude import __version__
+from credclaude.auth_launcher import ReauthGate, launch_claude_auth_login
 from credclaude.config import (
     APP_DIR,
     CONFIG_PATH,
@@ -36,27 +37,12 @@ from credclaude.notifications import (
     send_notification,
     write_lock,
 )
+from credclaude.time_utils import fmt_relative as _fmt_relative
 
 logger = logging.getLogger("credclaude.app")
 
 # Minimum seconds between menu-open refreshes to avoid API spam
 _MENU_OPEN_STALE_SEC = 30
-
-
-def _fmt_relative(dt: datetime.datetime | None) -> str:
-    """Format a future datetime as 'Xh Ym' countdown."""
-    if dt is None:
-        return "--"
-    now = datetime.datetime.now().astimezone()
-    if dt.tzinfo is None:
-        dt = dt.astimezone()
-    delta = dt - now
-    total_sec = max(0, int(delta.total_seconds()))
-    h = total_sec // 3600
-    m = (total_sec % 3600) // 60
-    if h == 0:
-        return f"{m}m"
-    return f"{h}h {m}m"
 
 
 class _MenuDelegate(NSObject):
@@ -91,6 +77,7 @@ class CredClaude(rumps.App):
                 NSApplication.sharedApplication().setApplicationIconImage_(ns_icon)
         NSProcessInfo.processInfo().setValue_forKey_("CredClaude", "processName")
         self.config = load_config()
+        self._reauth_gate = ReauthGate(self._reauth_cooldown_sec())
 
         # Limit provider (Official OAuth API + Estimator fallback)
         self._provider = CompositeLimitProvider(self.config)
@@ -104,6 +91,7 @@ class CredClaude(rumps.App):
         # Build menu
         self.menu = [
             rumps.MenuItem("Refresh", callback=self._refresh_now),
+            rumps.MenuItem("Re-authenticate", callback=self._reauth_now),
             rumps.MenuItem("Settings", callback=self._show_settings),
             rumps.separator,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
@@ -170,6 +158,7 @@ class CredClaude(rumps.App):
         self._last_pct = pct
         self._last_limit = limit
         self._last_refresh_time = time.monotonic()
+        self._maybe_auto_reauth(limit)
 
     # ------------------------------------------------------------------
     # Timer callbacks
@@ -237,6 +226,11 @@ class CredClaude(rumps.App):
             return
         self._update()
 
+    def _reauth_now(self, _sender) -> None:
+        self.config = load_config()
+        self._reauth_gate.update_cooldown(self._reauth_cooldown_sec())
+        self._trigger_reauth(auto=False, reason="manual menu action")
+
     def _show_settings(self, _sender) -> None:
         from credclaude.settings import SettingsWindow
         last = getattr(self, "_last_limit", None)
@@ -254,6 +248,7 @@ class CredClaude(rumps.App):
         old_auto = self.config.get("auto_refresh", True)
         self.config = cfg
         self._provider.update_config(cfg)
+        self._reauth_gate.update_cooldown(self._reauth_cooldown_sec())
 
         new_interval = cfg.get("refresh_interval_sec", REFRESH_INTERVAL_SEC)
         new_auto = cfg.get("auto_refresh", True)
@@ -274,3 +269,38 @@ class CredClaude(rumps.App):
                 logger.info("Auto-refresh OFF")
 
         logger.info("Settings applied")
+
+    def _reauth_cooldown_sec(self) -> int:
+        """Return configured auto re-auth cooldown in seconds."""
+        raw = self.config.get("auto_reauth_cooldown_sec", 1800)
+        try:
+            val = int(raw)
+        except Exception:
+            val = 1800
+        return max(30, min(86400, val))
+
+    def _maybe_auto_reauth(self, limit) -> None:
+        """Trigger background re-auth flow when auth expiry is detected."""
+        if not self.config.get("auto_reauth_enabled", True):
+            return
+        self._reauth_gate.update_cooldown(self._reauth_cooldown_sec())
+        if not self._reauth_gate.eligible_for_auto_launch(limit.error):
+            return
+        self._trigger_reauth(auto=True, reason=limit.error or "auth issue")
+
+    def _trigger_reauth(self, auto: bool, reason: str) -> None:
+        """Launch `claude auth login` in Terminal and surface feedback."""
+        self._reauth_gate.mark_attempt()
+        mode = "auto" if auto else "manual"
+        logger.info("Starting %s re-auth flow (%s)", mode, reason)
+        result = launch_claude_auth_login()
+        if result.success:
+            logger.info("Re-auth launch succeeded (%s)", mode)
+            send_notification(
+                "CredClaude Re-authenticate",
+                "Terminal opened for Claude login. Approve in browser, then refresh.",
+            )
+            return
+
+        logger.warning("Re-auth launch failed (%s): %s", mode, result.message)
+        send_notification("CredClaude Re-authenticate Failed", result.message)

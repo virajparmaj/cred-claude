@@ -26,6 +26,8 @@ class TestLoadConfig:
         cfg = load_config()
         assert cfg["billing_day"] == 1
         assert cfg["plan_tier"] == "pro"
+        assert cfg["auto_reauth_enabled"] is True
+        assert cfg["auto_reauth_cooldown_sec"] == 1800
 
     def test_reads_existing_config(self, config_env):
         config_env.write_text(json.dumps({"billing_day": 15, "plan_tier": "max_5x"}))
@@ -39,6 +41,8 @@ class TestLoadConfig:
         assert cfg["billing_day"] == 10
         assert "warn_at_pct" in cfg
         assert "plan_tier" in cfg
+        assert "auto_reauth_enabled" in cfg
+        assert "auto_reauth_cooldown_sec" in cfg
 
     def test_migrates_daily_message_limit(self, config_env):
         config_env.write_text(json.dumps({
@@ -53,6 +57,15 @@ class TestLoadConfig:
         config_env.write_text("not json!!!")
         cfg = load_config()
         assert cfg == DEFAULT_CONFIG
+
+    def test_invalid_reauth_fields_reset_to_defaults(self, config_env):
+        config_env.write_text(json.dumps({
+            "auto_reauth_enabled": "yes",
+            "auto_reauth_cooldown_sec": -1,
+        }))
+        cfg = load_config()
+        assert cfg["auto_reauth_enabled"] is True
+        assert cfg["auto_reauth_cooldown_sec"] == 1800
 
 
 class TestSaveConfig:

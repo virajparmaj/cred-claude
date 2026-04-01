@@ -45,11 +45,50 @@ _KEYCHAIN_SERVICE = "Claude Code-credentials"
 _TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _PROACTIVE_REFRESH_THRESHOLD_SEC = 600  # Refresh proactively if token expires within 10 min
+_RESET_PAST_GRACE_SEC = 300
+_RESET_MAX_FUTURE_SEC = 12 * 3600
 
 
 def _now() -> datetime.datetime:
     """Return current timezone-aware datetime (consistent across all providers)."""
     return datetime.datetime.now().astimezone()
+
+
+def _parse_resets_at(value: str | None, source: str) -> tuple[datetime.datetime | None, str | None]:
+    """Parse and sanitize resets_at. Returns (datetime_or_none, invalid_reason_or_none)."""
+    if not value:
+        return None, "missing"
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        logger.warning("%s resets_at parse failed (%r) — clearing", source, value)
+        return None, "parse_error"
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    else:
+        parsed = parsed.astimezone()
+
+    delta_sec = (parsed - _now()).total_seconds()
+    if delta_sec < -_RESET_PAST_GRACE_SEC:
+        return None, "too_past"
+    if delta_sec > _RESET_MAX_FUTURE_SEC:
+        logger.warning("%s resets_at too far in future (%s) — clearing", source, parsed.isoformat())
+        return None, "too_future"
+    return parsed, None
+
+
+def _heal_snapshot_resets_at(data: dict, reason: str) -> None:
+    """Self-heal snapshot by clearing an invalid resets_at field."""
+    if data.get("resets_at") is None:
+        return
+    try:
+        healed = dict(data)
+        healed["resets_at"] = None
+        SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        SNAPSHOT_PATH.write_text(json.dumps(healed))
+        logger.info("Snapshot resets_at cleared (%s)", reason)
+    except Exception as e:
+        logger.debug("Failed to heal snapshot resets_at: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +118,16 @@ def _normalize_utilization(value: float) -> float:
 def _save_snapshot(info: LimitInfo) -> None:
     """Persist last successful usage to disk."""
     try:
+        resets_at = info.resets_at
+        if resets_at is not None:
+            parsed, reason = _parse_resets_at(resets_at.isoformat(), "snapshot save")
+            if reason == "too_future":
+                resets_at = None
+            elif reason is None:
+                resets_at = parsed
         data = {
             "utilization_pct": info.utilization_pct,
-            "resets_at": info.resets_at.isoformat() if info.resets_at else None,
+            "resets_at": resets_at.isoformat() if resets_at else None,
             "last_sync": info.last_sync.isoformat() if info.last_sync else None,
             "source": info.source,
             "saved_at": _now().isoformat(),
@@ -96,14 +142,14 @@ def _load_snapshot() -> LimitInfo | None:
     """Load last successful usage from disk. Returns None on any error."""
     try:
         data = json.loads(SNAPSHOT_PATH.read_text())
-        resets_at = None
-        if data.get("resets_at"):
-            resets_at = datetime.datetime.fromisoformat(data["resets_at"])
+        resets_at, reset_reason = _parse_resets_at(data.get("resets_at"), "snapshot")
+        if reset_reason in ("too_future", "parse_error"):
+            _heal_snapshot_resets_at(data, reset_reason)
         last_sync = None
         if data.get("last_sync"):
             last_sync = datetime.datetime.fromisoformat(data["last_sync"])
         # Discard snapshot if its 5-hour window has already reset
-        if resets_at and resets_at < _now():
+        if reset_reason == "too_past":
             logger.debug("Snapshot expired (resets_at in past), discarding")
             return None
         return LimitInfo(
@@ -346,17 +392,18 @@ class OfficialLimitProvider(LimitProvider):
         try:
             data = json.loads(SNAPSHOT_PATH.read_text())
             saved_at_str = data.get("saved_at")
-            resets_at_str = data.get("resets_at")
-            if not saved_at_str or not resets_at_str:
+            resets_at, reset_reason = _parse_resets_at(data.get("resets_at"), "startup snapshot")
+            if not saved_at_str or resets_at is None:
+                if reset_reason in ("too_future", "parse_error"):
+                    _heal_snapshot_resets_at(data, reset_reason)
                 return False
 
             saved_at = datetime.datetime.fromisoformat(saved_at_str)
-            resets_at = datetime.datetime.fromisoformat(resets_at_str)
             now = _now()
 
             # Snapshot must be recent (<10 min) and not expired
             age_minutes = (now - saved_at).total_seconds() / 60
-            if age_minutes > 10 or resets_at < now:
+            if age_minutes > 10 or reset_reason == "too_past":
                 logger.debug("Snapshot too old (%.1f min) or expired, skipping", age_minutes)
                 return False
 
@@ -394,16 +441,11 @@ class OfficialLimitProvider(LimitProvider):
         """Parse an OAuth API usage response into a LimitInfo."""
         five_hour = data.get("five_hour", {})
         utilization = five_hour.get("utilization")  # fraction or percent
-        resets_at_str = five_hour.get("resets_at")
 
         if utilization is None:
             raise RuntimeError(f"Unexpected API response shape: {list(data.keys())}")
 
-        resets_at: datetime.datetime | None = None
-        if resets_at_str:
-            resets_at = datetime.datetime.fromisoformat(
-                resets_at_str.replace("Z", "+00:00")
-            ).astimezone()
+        resets_at, _ = _parse_resets_at(five_hour.get("resets_at"), "oauth api")
 
         return LimitInfo(
             source="official (claude.ai)",
