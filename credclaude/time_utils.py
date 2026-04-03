@@ -23,3 +23,14 @@ def fmt_relative(dt: datetime.datetime | None) -> str:
     if h == 0:
         return f"{m}m"
     return f"{h}h {m}m"
+
+
+def fmt_datetime(dt: datetime.datetime | None) -> str:
+    """Format a datetime as 'Apr 7 at 12:00 AM' for reset date+time display."""
+    if dt is None:
+        return "--"
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    else:
+        dt = dt.astimezone()
+    return dt.strftime("%b %-d at %-I:%M %p")

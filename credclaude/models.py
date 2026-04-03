@@ -81,3 +81,14 @@ class LimitInfo:
     # Session limit fields (from OAuth API)
     utilization_pct: float | None = None          # Real % from API (0–100)
     resets_at: datetime.datetime | None = None     # When the 5-hour window resets
+    # Weekly limit fields (from OAuth API — None when not applicable, e.g. student accounts)
+    weekly_utilization_pct: float | None = None
+    weekly_resets_at: datetime.datetime | None = None
+    # Auto-detected plan info from Keychain OAuth metadata
+    subscription_type: str | None = None           # e.g. "pro", "max", "student"
+    rate_limit_tier: str | None = None             # e.g. "default_claude_ai"
+    # Extra usage / API credits (from OAuth API — None when not enabled)
+    extra_usage_enabled: bool | None = None
+    extra_usage_monthly_limit: float | None = None
+    extra_usage_used: float | None = None
+    extra_usage_utilization: float | None = None

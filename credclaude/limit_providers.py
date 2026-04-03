@@ -47,6 +47,7 @@ _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _PROACTIVE_REFRESH_THRESHOLD_SEC = 600  # Refresh proactively if token expires within 10 min
 _RESET_PAST_GRACE_SEC = 300
 _RESET_MAX_FUTURE_SEC = 12 * 3600
+_WEEKLY_RESET_MAX_FUTURE_SEC = 8 * 24 * 3600  # 8 days — weekly resets are ~7 days out
 
 
 def _now() -> datetime.datetime:
@@ -54,7 +55,11 @@ def _now() -> datetime.datetime:
     return datetime.datetime.now().astimezone()
 
 
-def _parse_resets_at(value: str | None, source: str) -> tuple[datetime.datetime | None, str | None]:
+def _parse_resets_at(
+    value: str | None,
+    source: str,
+    max_future_sec: int = _RESET_MAX_FUTURE_SEC,
+) -> tuple[datetime.datetime | None, str | None]:
     """Parse and sanitize resets_at. Returns (datetime_or_none, invalid_reason_or_none)."""
     if not value:
         return None, "missing"
@@ -71,7 +76,7 @@ def _parse_resets_at(value: str | None, source: str) -> tuple[datetime.datetime 
     delta_sec = (parsed - _now()).total_seconds()
     if delta_sec < -_RESET_PAST_GRACE_SEC:
         return None, "too_past"
-    if delta_sec > _RESET_MAX_FUTURE_SEC:
+    if delta_sec > max_future_sec:
         logger.warning("%s resets_at too far in future (%s) — clearing", source, parsed.isoformat())
         return None, "too_future"
     return parsed, None
@@ -125,12 +130,35 @@ def _save_snapshot(info: LimitInfo) -> None:
                 resets_at = None
             elif reason is None:
                 resets_at = parsed
+        weekly_resets_at = info.weekly_resets_at
+        if weekly_resets_at is not None:
+            parsed_w, reason_w = _parse_resets_at(
+                weekly_resets_at.isoformat(), "snapshot save weekly",
+                max_future_sec=_WEEKLY_RESET_MAX_FUTURE_SEC,
+            )
+            if reason_w is not None:
+                weekly_resets_at = None
+            else:
+                weekly_resets_at = parsed_w
         data = {
             "utilization_pct": info.utilization_pct,
             "resets_at": resets_at.isoformat() if resets_at else None,
             "last_sync": info.last_sync.isoformat() if info.last_sync else None,
             "source": info.source,
             "saved_at": _now().isoformat(),
+            # Weekly limit (nullable)
+            "weekly_utilization_pct": info.weekly_utilization_pct,
+            "weekly_resets_at": (
+                weekly_resets_at.isoformat() if weekly_resets_at else None
+            ),
+            # Plan metadata (nullable)
+            "subscription_type": info.subscription_type,
+            "rate_limit_tier": info.rate_limit_tier,
+            # Extra usage (nullable)
+            "extra_usage_enabled": info.extra_usage_enabled,
+            "extra_usage_monthly_limit": info.extra_usage_monthly_limit,
+            "extra_usage_used": info.extra_usage_used,
+            "extra_usage_utilization": info.extra_usage_utilization,
         }
         SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         SNAPSHOT_PATH.write_text(json.dumps(data))
@@ -152,6 +180,14 @@ def _load_snapshot() -> LimitInfo | None:
         if reset_reason == "too_past":
             logger.debug("Snapshot expired (resets_at in past), discarding")
             return None
+        # Weekly resets_at (nullable, lenient — ignore if invalid)
+        weekly_resets_at = None
+        raw_weekly_resets = data.get("weekly_resets_at")
+        if raw_weekly_resets:
+            weekly_resets_at, _ = _parse_resets_at(
+                raw_weekly_resets, "snapshot weekly",
+                max_future_sec=_WEEKLY_RESET_MAX_FUTURE_SEC,
+            )
         return LimitInfo(
             source=data.get("source", "official"),
             utilization_pct=data.get("utilization_pct"),
@@ -159,6 +195,14 @@ def _load_snapshot() -> LimitInfo | None:
             last_sync=last_sync,
             state=ProviderState.HEALTHY,
             confidence=Confidence.HIGH,
+            weekly_utilization_pct=data.get("weekly_utilization_pct"),
+            weekly_resets_at=weekly_resets_at,
+            subscription_type=data.get("subscription_type"),
+            rate_limit_tier=data.get("rate_limit_tier"),
+            extra_usage_enabled=data.get("extra_usage_enabled"),
+            extra_usage_monthly_limit=data.get("extra_usage_monthly_limit"),
+            extra_usage_used=data.get("extra_usage_used"),
+            extra_usage_utilization=data.get("extra_usage_utilization"),
         )
     except Exception as e:
         logger.debug("Failed to load snapshot: %s", e)
@@ -206,6 +250,9 @@ class OfficialLimitProvider(LimitProvider):
         self._retry_after: datetime.datetime | None = None
         self._retry_reason: str | None = None
         self._rate_limit_step = 0
+        # Keychain metadata (populated on each token read)
+        self._subscription_type: str | None = None
+        self._rate_limit_tier: str | None = None
 
     # ------------------------------------------------------------------
     # Token extraction and refresh
@@ -234,6 +281,10 @@ class OfficialLimitProvider(LimitProvider):
                 raise KeyError("not JSON")
             oauth = data["claudeAiOauth"]
             access_token = oauth["accessToken"]
+
+            # Extract plan metadata from Keychain (available without extra API calls)
+            self._subscription_type = oauth.get("subscriptionType")
+            self._rate_limit_tier = oauth.get("rateLimitTier")
 
             # Proactive refresh: if token expires soon and we have a refresh token, refresh now
             expires_at_ms = oauth.get("expiresAt")
@@ -411,6 +462,15 @@ class OfficialLimitProvider(LimitProvider):
             if data.get("last_sync"):
                 last_sync = datetime.datetime.fromisoformat(data["last_sync"])
 
+            # Weekly resets_at (nullable, lenient)
+            weekly_resets_at = None
+            raw_weekly_resets = data.get("weekly_resets_at")
+            if raw_weekly_resets:
+                weekly_resets_at, _ = _parse_resets_at(
+                    raw_weekly_resets, "startup weekly",
+                    max_future_sec=_WEEKLY_RESET_MAX_FUTURE_SEC,
+                )
+
             info = LimitInfo(
                 source=data.get("source", "official"),
                 utilization_pct=data.get("utilization_pct"),
@@ -418,6 +478,14 @@ class OfficialLimitProvider(LimitProvider):
                 last_sync=last_sync,
                 state=ProviderState.HEALTHY,
                 confidence=Confidence.HIGH,
+                weekly_utilization_pct=data.get("weekly_utilization_pct"),
+                weekly_resets_at=weekly_resets_at,
+                subscription_type=data.get("subscription_type"),
+                rate_limit_tier=data.get("rate_limit_tier"),
+                extra_usage_enabled=data.get("extra_usage_enabled"),
+                extra_usage_monthly_limit=data.get("extra_usage_monthly_limit"),
+                extra_usage_used=data.get("extra_usage_used"),
+                extra_usage_utilization=data.get("extra_usage_utilization"),
             )
             self._cached = info
             self._cache_time = now
@@ -447,6 +515,35 @@ class OfficialLimitProvider(LimitProvider):
 
         resets_at, _ = _parse_resets_at(five_hour.get("resets_at"), "oauth api")
 
+        # Weekly limit (None for student/edu accounts that have no weekly cap)
+        seven_day = data.get("seven_day")
+        weekly_utilization_pct = None
+        weekly_resets_at = None
+        if seven_day is not None:
+            raw_weekly_util = seven_day.get("utilization")
+            if raw_weekly_util is not None:
+                weekly_utilization_pct = _normalize_utilization(raw_weekly_util)
+            weekly_resets_at, _ = _parse_resets_at(
+                seven_day.get("resets_at"), "oauth api weekly",
+                max_future_sec=_WEEKLY_RESET_MAX_FUTURE_SEC,
+            )
+
+        weekly_cap_note = (
+            "No weekly limit (student/edu account)"
+            if seven_day is None
+            else "Weekly cap may apply — check claude.ai for details"
+        )
+
+        # Extra usage / API credits
+        extra = data.get("extra_usage") or {}
+        extra_enabled = extra.get("is_enabled")
+        extra_monthly_limit = extra.get("monthly_limit")
+        extra_used = extra.get("used_credits")
+        raw_extra_util = extra.get("utilization")
+        extra_utilization = (
+            _normalize_utilization(raw_extra_util) if raw_extra_util is not None else None
+        )
+
         return LimitInfo(
             source="official (claude.ai)",
             plan_tier="unknown",
@@ -456,8 +553,16 @@ class OfficialLimitProvider(LimitProvider):
             last_sync=_now(),
             utilization_pct=_normalize_utilization(utilization),
             resets_at=resets_at,
-            weekly_cap_note="Weekly cap may apply — check claude.ai for details",
+            weekly_cap_note=weekly_cap_note,
             error=None,
+            weekly_utilization_pct=weekly_utilization_pct,
+            weekly_resets_at=weekly_resets_at,
+            subscription_type=self._subscription_type,
+            rate_limit_tier=self._rate_limit_tier,
+            extra_usage_enabled=extra_enabled,
+            extra_usage_monthly_limit=extra_monthly_limit,
+            extra_usage_used=extra_used,
+            extra_usage_utilization=extra_utilization,
         )
 
     def _store_usage(self, info: LimitInfo) -> None:
@@ -545,6 +650,14 @@ class OfficialLimitProvider(LimitProvider):
                 resets_at=self._cached.resets_at,
                 weekly_cap_note=self._cached.weekly_cap_note,
                 error=reason,
+                weekly_utilization_pct=self._cached.weekly_utilization_pct,
+                weekly_resets_at=self._cached.weekly_resets_at,
+                subscription_type=self._cached.subscription_type,
+                rate_limit_tier=self._cached.rate_limit_tier,
+                extra_usage_enabled=self._cached.extra_usage_enabled,
+                extra_usage_monthly_limit=self._cached.extra_usage_monthly_limit,
+                extra_usage_used=self._cached.extra_usage_used,
+                extra_usage_utilization=self._cached.extra_usage_utilization,
             )
         # Try disk snapshot
         snapshot = _load_snapshot()

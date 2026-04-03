@@ -37,7 +37,8 @@ from credclaude.notifications import (
     send_notification,
     write_lock,
 )
-from credclaude.time_utils import fmt_relative as _fmt_relative
+from credclaude.formatting import make_bar
+from credclaude.time_utils import fmt_datetime as _fmt_datetime, fmt_relative as _fmt_relative
 
 logger = logging.getLogger("credclaude.app")
 
@@ -88,14 +89,48 @@ class CredClaude(rumps.App):
         # Startup cleanup
         cleanup_old_warn_locks()
 
-        # Build menu
+        # Info menu items (updated dynamically on each refresh)
+        # Use a no-op callback so items appear enabled (not greyed out)
+        _noop = lambda _: None
+        self._plan_item = rumps.MenuItem("Plan: —", callback=_noop)
+        self._weekly_bar_item = rumps.MenuItem("Weekly: —", callback=_noop)
+        self._weekly_reset_item = rumps.MenuItem("  Resets: —", callback=_noop)
+        self._extra_usage_item = rumps.MenuItem("Extra usage: —", callback=_noop)
+
+        # Separator items we need to hide/show with their sections
+        self._sep_after_plan = rumps.MenuItem("")
+        self._sep_after_weekly = rumps.MenuItem("")
+        self._sep_after_extra = rumps.MenuItem("")
+
+        # Build menu — separators are managed manually via NSMenuItem
         self.menu = [
+            self._plan_item,
+            self._sep_after_plan,
+            self._weekly_bar_item,
+            self._weekly_reset_item,
+            self._sep_after_weekly,
+            self._extra_usage_item,
+            self._sep_after_extra,
             rumps.MenuItem("Refresh", callback=self._refresh_now),
             rumps.MenuItem("Re-authenticate", callback=self._reauth_now),
             rumps.MenuItem("Settings", callback=self._show_settings),
             rumps.separator,
             rumps.MenuItem("Quit", callback=rumps.quit_application),
         ]
+
+        # Replace placeholder items with real NSMenuItem separators
+        for sep_item in (self._sep_after_plan, self._sep_after_weekly, self._sep_after_extra):
+            ns = sep_item._menuitem
+            ns_menu = ns.menu()
+            if ns_menu:
+                idx = ns_menu.indexOfItem_(ns)
+                ns_menu.removeItemAtIndex_(idx)
+                real_sep = __import__("AppKit").NSMenuItem.separatorItem()
+                ns_menu.insertItem_atIndex_(real_sep, idx)
+                sep_item._menuitem = real_sep
+
+        # Start with info items hidden (shown once data arrives)
+        self._set_info_hidden(plan=True, weekly=True, extra=True)
 
         # Set up menu delegate for click-to-refresh
         self._menu_delegate = _MenuDelegate.alloc().init()
@@ -116,6 +151,29 @@ class CredClaude(rumps.App):
 
         rumps.Timer(self._check_notifications, NOTIF_CHECK_INTERVAL_SEC).start()
         logger.info("CredClaude started (v%s)", __version__)
+
+    # ------------------------------------------------------------------
+    # Info item visibility
+    # ------------------------------------------------------------------
+    def _set_info_hidden(self, plan: bool, weekly: bool, extra: bool) -> None:
+        """Show/hide info sections and their separators.
+
+        Separator logic avoids stacked/orphan separators:
+        - sep_after_plan: shown only if plan is visible AND (weekly or extra visible)
+        - sep_after_weekly: shown only if weekly is visible AND extra is visible
+        - sep_after_extra: shown if ANY info item is visible (divides info from actions)
+        """
+        any_visible = not (plan and weekly and extra)
+
+        self._plan_item._menuitem.setHidden_(plan)
+        self._sep_after_plan._menuitem.setHidden_(plan or (weekly and extra))
+
+        self._weekly_bar_item._menuitem.setHidden_(weekly)
+        self._weekly_reset_item._menuitem.setHidden_(weekly)
+        self._sep_after_weekly._menuitem.setHidden_(weekly or extra)
+
+        self._extra_usage_item._menuitem.setHidden_(extra)
+        self._sep_after_extra._menuitem.setHidden_(not any_visible)
 
     # ------------------------------------------------------------------
     # Display update
@@ -153,6 +211,51 @@ class CredClaude(rumps.App):
                 self.title = "⏸ off"
             else:
                 self.title = "⏸ --"
+
+        # ------------------------------------------------------------------
+        # Dropdown: Plan type (hidden when not available)
+        # ------------------------------------------------------------------
+        sub_type = limit.subscription_type
+        show_plan = sub_type is not None
+        if show_plan:
+            self._plan_item.title = f"Plan: {sub_type.replace('_', ' ').title()}"
+
+        # ------------------------------------------------------------------
+        # Dropdown: Weekly limit bar + reset time (hidden when not applicable)
+        # ------------------------------------------------------------------
+        weekly_pct = limit.weekly_utilization_pct
+        show_weekly = weekly_pct is not None
+        if show_weekly:
+            bar = make_bar(weekly_pct, width=15)
+            self._weekly_bar_item.title = f"Weekly: {bar} {weekly_pct:.0f}%"
+            self._weekly_reset_item.title = (
+                f"  Resets: {_fmt_datetime(limit.weekly_resets_at)}"
+            )
+
+        # ------------------------------------------------------------------
+        # Dropdown: Extra usage / credits (hidden when not enabled)
+        # ------------------------------------------------------------------
+        show_extra = limit.extra_usage_enabled is True
+        if show_extra:
+            if limit.extra_usage_utilization is not None:
+                bar = make_bar(limit.extra_usage_utilization, width=15)
+                self._extra_usage_item.title = (
+                    f"Extra usage: {bar} {limit.extra_usage_utilization:.0f}%"
+                )
+            elif (limit.extra_usage_used is not None
+                  and limit.extra_usage_monthly_limit is not None):
+                self._extra_usage_item.title = (
+                    f"Extra usage: ${limit.extra_usage_used:.2f}"
+                    f" / ${limit.extra_usage_monthly_limit:.2f}"
+                )
+            else:
+                self._extra_usage_item.title = "Extra usage: enabled"
+
+        self._set_info_hidden(
+            plan=not show_plan,
+            weekly=not show_weekly,
+            extra=not show_extra,
+        )
 
         # Store for notification checks
         self._last_pct = pct

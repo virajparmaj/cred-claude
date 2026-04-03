@@ -1069,3 +1069,348 @@ class TestOAuthAutoRefresh:
 # Import needed in test scope
 _OAUTH_URL = "https://api.anthropic.com/api/oauth/usage"
 _TOKEN_REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
+
+
+# ---------------------------------------------------------------------------
+# Weekly limit, extra usage, and plan detection
+# ---------------------------------------------------------------------------
+def _make_full_api_response(
+    utilization: float = 0.84,
+    resets_in_hours: float = 1.5,
+    seven_day: dict | None = None,
+    extra_usage: dict | None = None,
+) -> bytes:
+    """Build a fake OAuth API response with all fields."""
+    resets_at = (
+        datetime.datetime.now(datetime.timezone.utc)
+        + datetime.timedelta(hours=resets_in_hours)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    data = {
+        "five_hour": {"utilization": utilization, "resets_at": resets_at},
+        "seven_day": seven_day,
+        "seven_day_oauth_apps": None,
+        "seven_day_opus": None,
+        "seven_day_sonnet": None,
+        "seven_day_cowork": None,
+        "iguana_necktie": None,
+        "extra_usage": extra_usage or {"is_enabled": False, "monthly_limit": None,
+                                       "used_credits": None, "utilization": None},
+    }
+    return json.dumps(data).encode()
+
+
+def _make_keychain_with_metadata(
+    token: str = "sk-ant-oat01-testtoken",
+    subscription_type: str | None = "pro",
+    rate_limit_tier: str | None = "default_claude_ai",
+) -> str:
+    """Build Keychain JSON with subscription metadata."""
+    oauth: dict = {"accessToken": token}
+    if subscription_type is not None:
+        oauth["subscriptionType"] = subscription_type
+    if rate_limit_tier is not None:
+        oauth["rateLimitTier"] = rate_limit_tier
+    return json.dumps({"claudeAiOauth": oauth})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_snapshot(tmp_path):
+    """Prevent new tests from writing to the real snapshot file."""
+    with patch("credclaude.limit_providers.SNAPSHOT_PATH", tmp_path / "snapshot.json"):
+        yield
+
+
+class TestPlanDetection:
+    """Tests for auto-detection of subscription type from Keychain metadata."""
+
+    def _mock_subprocess(self, keychain_json: str):
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = keychain_json
+        return mock
+
+    def _mock_urlopen(self, body: bytes):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_subscription_type_extracted(self):
+        provider = OfficialLimitProvider()
+        kc = _make_keychain_with_metadata(subscription_type="pro")
+        body = _make_full_api_response()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess(kc)):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.subscription_type == "pro"
+        assert info.rate_limit_tier == "default_claude_ai"
+
+    def test_missing_subscription_type_is_none(self):
+        provider = OfficialLimitProvider()
+        kc = _make_keychain_with_metadata(
+            subscription_type=None, rate_limit_tier=None
+        )
+        body = _make_full_api_response()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess(kc)):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.subscription_type is None
+        assert info.rate_limit_tier is None
+
+    def test_raw_token_no_metadata(self):
+        """Raw sk- token (no JSON wrapper) → no metadata."""
+        provider = OfficialLimitProvider()
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.stdout = "sk-ant-oat01-rawtoken"
+        body = _make_full_api_response()
+
+        with patch("subprocess.run", return_value=mock_proc):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.subscription_type is None
+
+
+class TestWeeklyLimit:
+    """Tests for weekly (seven_day) limit parsing."""
+
+    def _mock_subprocess(self, keychain_json: str = None):
+        kc = keychain_json or _make_keychain_with_metadata()
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = kc
+        return mock
+
+    def _mock_urlopen(self, body: bytes):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_weekly_data_present(self):
+        weekly_resets = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(days=3)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = _make_full_api_response(
+            seven_day={"utilization": 0.12, "resets_at": weekly_resets}
+        )
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.weekly_utilization_pct == pytest.approx(12.0)
+        assert info.weekly_resets_at is not None
+
+    def test_weekly_data_null_student_account(self):
+        body = _make_full_api_response(seven_day=None)
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.weekly_utilization_pct is None
+        assert info.weekly_resets_at is None
+        assert "student" in info.weekly_cap_note.lower() or "no weekly" in info.weekly_cap_note.lower()
+
+    def test_weekly_with_utilization_null(self):
+        """seven_day present but utilization is null."""
+        body = _make_full_api_response(
+            seven_day={"utilization": None, "resets_at": None}
+        )
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.weekly_utilization_pct is None
+        assert info.weekly_resets_at is None
+
+    def test_weekly_data_in_old_api_response(self):
+        """API response with only five_hour (no seven_day key) → weekly fields None."""
+        body = _make_api_response(utilization=0.5)
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.weekly_utilization_pct is None
+        assert info.weekly_resets_at is None
+
+
+class TestExtraUsage:
+    """Tests for extra usage / API credits parsing."""
+
+    def _mock_subprocess(self):
+        kc = _make_keychain_with_metadata()
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = kc
+        return mock
+
+    def _mock_urlopen(self, body: bytes):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    def test_extra_usage_disabled(self):
+        body = _make_full_api_response(
+            extra_usage={"is_enabled": False, "monthly_limit": None,
+                         "used_credits": None, "utilization": None}
+        )
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.extra_usage_enabled is False
+        assert info.extra_usage_monthly_limit is None
+        assert info.extra_usage_used is None
+        assert info.extra_usage_utilization is None
+
+    def test_extra_usage_enabled(self):
+        body = _make_full_api_response(
+            extra_usage={"is_enabled": True, "monthly_limit": 100.0,
+                         "used_credits": 25.0, "utilization": 0.25}
+        )
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.extra_usage_enabled is True
+        assert info.extra_usage_monthly_limit == pytest.approx(100.0)
+        assert info.extra_usage_used == pytest.approx(25.0)
+        assert info.extra_usage_utilization == pytest.approx(25.0)
+
+    def test_extra_usage_missing_from_response(self):
+        """Old API response without extra_usage key."""
+        body = _make_api_response(utilization=0.5)
+        provider = OfficialLimitProvider()
+
+        with patch("subprocess.run", return_value=self._mock_subprocess()):
+            with patch("urllib.request.urlopen", return_value=self._mock_urlopen(body)):
+                info = provider.get_limit_info()
+
+        assert info.extra_usage_enabled is None
+        assert info.extra_usage_utilization is None
+
+
+class TestSnapshotNewFields:
+    """Tests for snapshot round-trip with weekly/plan/extra fields."""
+
+    def test_save_and_load_with_weekly(self, tmp_path):
+        snapshot_path = tmp_path / "snapshot.json"
+        weekly_resets = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=3)
+        )
+        info = LimitInfo(
+            source="official (claude.ai)",
+            utilization_pct=45.0,
+            resets_at=datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=2),
+            last_sync=datetime.datetime.now(datetime.timezone.utc),
+            state=ProviderState.HEALTHY,
+            confidence=Confidence.HIGH,
+            weekly_utilization_pct=12.0,
+            weekly_resets_at=weekly_resets,
+            subscription_type="pro",
+            rate_limit_tier="default_claude_ai",
+            extra_usage_enabled=False,
+        )
+
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            _save_snapshot(info)
+            loaded = _load_snapshot()
+
+        assert loaded is not None
+        assert loaded.weekly_utilization_pct == pytest.approx(12.0)
+        assert loaded.weekly_resets_at is not None
+        assert loaded.subscription_type == "pro"
+        assert loaded.rate_limit_tier == "default_claude_ai"
+        assert loaded.extra_usage_enabled is False
+
+    def test_load_old_snapshot_without_new_fields(self, tmp_path):
+        """Old snapshot without weekly/plan/extra fields loads fine with None defaults."""
+        snapshot_path = tmp_path / "snapshot.json"
+        future = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(hours=2)
+        )
+        now = datetime.datetime.now(datetime.timezone.utc)
+        snapshot_path.write_text(json.dumps({
+            "utilization_pct": 30.0,
+            "resets_at": future.isoformat(),
+            "last_sync": now.isoformat(),
+            "source": "official (claude.ai)",
+            "saved_at": now.isoformat(),
+        }))
+
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            loaded = _load_snapshot()
+
+        assert loaded is not None
+        assert loaded.utilization_pct == pytest.approx(30.0)
+        assert loaded.weekly_utilization_pct is None
+        assert loaded.weekly_resets_at is None
+        assert loaded.subscription_type is None
+        assert loaded.rate_limit_tier is None
+        assert loaded.extra_usage_enabled is None
+
+    def test_fallback_carries_weekly_fields(self, tmp_path):
+        """Fallback from cached data preserves weekly/plan/extra fields."""
+        snapshot_path = tmp_path / "snapshot.json"
+        provider = OfficialLimitProvider()
+        kc = _make_keychain_with_metadata(subscription_type="max")
+        weekly_resets = (
+            datetime.datetime.now(datetime.timezone.utc)
+            + datetime.timedelta(days=3)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = _make_full_api_response(
+            utilization=0.5,
+            seven_day={"utilization": 0.2, "resets_at": weekly_resets},
+            extra_usage={"is_enabled": True, "monthly_limit": 50.0,
+                         "used_credits": 10.0, "utilization": 0.2},
+        )
+
+        mock_proc = MagicMock(returncode=0, stdout=kc)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = body
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("credclaude.limit_providers.SNAPSHOT_PATH", snapshot_path):
+            with patch("subprocess.run", return_value=mock_proc):
+                with patch("urllib.request.urlopen", return_value=mock_resp):
+                    provider.get_limit_info()
+
+            # Expire cache, then trigger fallback
+            provider._cache_time = (
+                datetime.datetime.now().astimezone()
+                - datetime.timedelta(seconds=120)
+            )
+            fail_proc = MagicMock(returncode=44, stderr="not found")
+            with patch("subprocess.run", return_value=fail_proc):
+                info = provider.get_limit_info()
+
+        assert info.utilization_pct == pytest.approx(50.0)
+        assert info.weekly_utilization_pct == pytest.approx(20.0)
+        assert info.subscription_type == "max"
+        assert info.extra_usage_enabled is True
