@@ -23,7 +23,8 @@ Describe real end-user flows and where they are complete or incomplete.
 
 - **Daily monitoring flow**:
   1. 5s after start: fetch OAuth utilization + scan JSONL files.
-  2. Every 60s: refresh menu — session %, reset countdown, daily spend, period total, model breakdown.
+  2. Every 60s: refresh menu — session %, weekly %, extra usage, reset countdowns, daily spend, period total, model breakdown.
+  3. Weekly and extra-usage sections hidden when API returns no data for those fields.
   (`credclaude/app.py`, `credclaude/limit_providers.py`, `credclaude/ingestion.py`)
 
 - **Settings update flow**:
@@ -38,11 +39,15 @@ Describe real end-user flows and where they are complete or incomplete.
   3. Billing reset: send notification once per reset day.
   (`credclaude/notifications.py`)
 
-- **Token expiry / re-auth flow**:
-  1. OAuth returns 401 → app enters 5-min cooldown.
-  2. Menu shows last known data marked "(stale)" + `"Token expired — run: claude auth login"`.
-  3. User runs `claude auth login` in terminal, then clicks "Refresh Now".
-  (`credclaude/limit_providers.py`)
+- **Token expiry / re-auth flow (automatic)**:
+  1. OAuth returns 401 → app first attempts silent token refresh.
+  2. If silent refresh succeeds, usage fetch retried immediately.
+  3. If silent refresh fails → 5-min cooldown; menu shows "(stale)" + error.
+  4. On each update cycle, `_maybe_auto_reauth()` checks if error is auth-related and `ReauthGate` cooldown (default 30 min) has elapsed.
+  5. If eligible: opens Terminal via AppleScript and runs `claude auth login` automatically.
+  6. User completes browser authorization; clicks "Refresh Now" to resume live data.
+  7. Manual "Re-authenticate" menu item triggers this immediately regardless of cooldown.
+  (`credclaude/limit_providers.py`, `credclaude/auth_launcher.py`, `credclaude/app.py`)
 
 - **Rate limit flow**:
   1. OAuth returns 429 → exponential backoff (120s → 300s → 600s).

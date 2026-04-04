@@ -19,8 +19,12 @@ Map interaction surfaces for this project (menu-based desktop app, not route-bas
 | `period_total` menu item | Billing-period total | No | dynamic menu label | period scan totals | Implemented |
 | `billing_reset` menu item | Time to next billing reset | No | dynamic menu label | countdown helper | Implemented |
 | `last_sync` menu item | Timestamp of last successful OAuth sync | No | dynamic menu label | `LimitInfo.last_sync` | Implemented |
-| `Settings` action | Multi-step settings dialogs | No | `rumps.Window` dialogs | config values | Implemented |
+| `weekly_bar_item` menu item | 7-day window utilization % bar | No | dynamic menu label | `LimitInfo.weekly_utilization_pct` | Implemented (hidden if API returns no weekly data) |
+| `weekly_reset_item` menu item | Date+time of next 7-day window reset | No | dynamic menu label | `LimitInfo.weekly_resets_at` | Implemented (hidden if API returns no weekly data) |
+| `extra_usage_item` menu item | Extra (add-on) usage bar or dollar amounts | No | dynamic menu label | `LimitInfo.extra_usage_*` | Implemented (hidden if `extra_usage_enabled` is false/None) |
+| `Settings` action | Multi-step settings dialogs | No | AppKit native window (`settings.py`) | config values | Implemented |
 | `Refresh Now` action | Force immediate refresh | No | callback | clears backoff + reloads | Implemented |
+| `Re-authenticate` action | Manually trigger `claude auth login` in Terminal | No | `auth_launcher.launch_claude_auth_login()` | none | Implemented |
 | `Quit` action | Exit app process | No | `rumps.quit_application` | none | Implemented |
 
 ## Inferred / proposed

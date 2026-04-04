@@ -14,6 +14,13 @@ Define a practical, repo-specific roadmap for continued improvement of this loca
 - Externalized pricing (`~/.credclaude/pricing.json`) with staleness check
 - Native macOS settings window (`credclaude/settings.py`) via AppKit/objc — replaces sequential rumps dialog chain
 - Notifications toggle in settings UI
+- Weekly utilization + extra usage sections in menu (hidden when API returns no data)
+- Auto re-auth: `ReauthGate` + `launch_claude_auth_login()` opens Terminal automatically on auth errors
+- Manual "Re-authenticate" menu item
+- App hidden from Dock/CMD+Tab via `NSApplicationActivationPolicyAccessory`
+- Dedicated icon assets module (`icon_assets.py`) + sharpened `@2x` menu bar icon
+- Time utilities module (`time_utils.py`) with `fmt_relative()` and `fmt_datetime()`
+- 10 test modules including `test_auth_launcher.py`, `test_icon_assets.py`, `test_app.py`
 - Atomic PID lock (`fcntl.flock`)
 - Structured logging with `RotatingFileHandler`
 - Type-validated config loading

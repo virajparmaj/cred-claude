@@ -22,6 +22,11 @@ Catalog implemented and missing capabilities with direct code evidence.
 - **Automatic OAuth token refresh**: proactive refresh when token expires within 10 minutes; silent reactive refresh on HTTP 401 before entering cooldown (`credclaude/limit_providers.py`).
 - **Plan tier estimator** fallback with LOW-confidence community estimates when OAuth is unavailable.
 - **Graceful degradation**: OAuth (with auto-refresh) → stale cache → disk snapshot → estimator → offline.
+- **Weekly utilization** from OAuth API `seven_day` key: weekly %, reset date+time shown as "Apr 7 at 12:00 AM". Hidden for accounts without a weekly cap (`credclaude/limit_providers.py`, `credclaude/app.py`).
+- **Extra usage** from OAuth API `extra_usage` key: shown as bar + % when `extra_usage_enabled` is true, with monthly dollar amounts when available (`credclaude/limit_providers.py`, `credclaude/app.py`).
+- **Auto re-auth**: On each update cycle, if `LimitInfo.error` indicates an auth error, `ReauthGate` (30-min cooldown) auto-triggers `launch_claude_auth_login()` to open Terminal and run `claude auth login`. Manual "Re-authenticate" menu item also available. Controlled by `auto_reauth_enabled` config key (`credclaude/auth_launcher.py`, `credclaude/app.py`).
+- **Dock-hidden operation**: App sets `NSApplicationActivationPolicyAccessory` at startup — does not appear in Dock or CMD+Tab (`credclaude/app.py`).
+- **Icon assets**: Dedicated menu bar icon (`assets/credclaude_menubar.png`) and runtime/dock icon (`.app` bundle resources or repo fallback PNGs) managed by `credclaude/icon_assets.py`.
 
 ## Inferred / proposed
 - [Not found in repository] **Not implemented**: Historical trend view (weekly/monthly charts) and CSV export.
@@ -36,7 +41,7 @@ Catalog implemented and missing capabilities with direct code evidence.
 ## Open issues / gaps
 - No self-diagnostics screen showing scanned files, skipped entries, or last scan time.
 - No historical summaries or export capability.
-- Weekly usage cap not exposed by the OAuth API; UI acknowledges this.
+- Weekly utilization is now shown when the API exposes it; weekly cap is not independently computed locally.
 
 ## Recommended next steps
 - Add a "Data health" section showing scanned files, skipped entries, and last scan time.

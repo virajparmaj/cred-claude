@@ -15,6 +15,12 @@ Document data contracts and integration boundaries used by the app.
 - **Response fields used**:
   - `utilization` — float, fraction format (0.0–1.0); normalized to 0–100% by `_normalize_utilization()`
   - `resets_at` — ISO8601 timestamp for next 5-hour window reset
+  - `seven_day.utilization` — float (0.0–1.0); weekly utilization %. `None` for accounts without a weekly cap.
+  - `seven_day.resets_at` — ISO8601 timestamp for next 7-day window reset; parsed with 8-day max-future guard (`_WEEKLY_RESET_MAX_FUTURE_SEC`).
+  - `extra_usage.enabled` — bool; whether extra (add-on) usage is active.
+  - `extra_usage.monthly_limit` — float; monthly dollar cap for extra usage.
+  - `extra_usage.used` — float; dollars used toward extra usage this month.
+  - `extra_usage.utilization` — float (0.0–1.0); fraction of extra usage cap consumed.
 - **Error handling**:
   - HTTP 401 → token expired; 5-min cooldown, menu shows "(stale)" + `"Token expired — run: claude auth login"`
   - HTTP 429 → rate limited; exponential backoff `[120, 300, 600]`s; last known data shown during backoff

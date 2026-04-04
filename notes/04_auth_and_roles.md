@@ -27,11 +27,21 @@ This is a single-user local macOS menu bar app. There is no authentication layer
 - After a successful refresh, the Keychain entry is updated with the new `accessToken`, `refreshToken`, and `expiresAt`.
 - The `refreshToken` itself expires on Anthropic's server side (typically weeks/months). Only when it expires will the user need to run `claude auth login` again.
 
-### Re-authentication (when truly needed)
+### Automatic Re-authentication (auto-reauth)
 
-If the refresh token itself has expired, the app shows "Token expired" and the user must:
+When the provider error indicates an auth failure (e.g. "token expired", "unauthorized"), the app automatically opens Terminal and runs `claude auth login` via AppleScript (`credclaude/auth_launcher.py`):
 
-1. Open a terminal
+- `ReauthGate` enforces a cooldown (default 30 min, config key `auto_reauth_cooldown_sec`) to avoid repeated popups.
+- Disabled via `auto_reauth_enabled: false` in `~/.credclaude/config.json`.
+- A manual "Re-authenticate" menu item is always available to trigger this immediately.
+- Browser authorization still requires user action after Terminal opens.
+- If macOS denies Terminal automation, a permission error is shown. The user must grant Accessibility/Automation permission in System Settings.
+
+### Re-authentication (when truly needed — manual path)
+
+If the refresh token itself has expired and auto-reauth is disabled or fails:
+
+1. Open a terminal manually
 2. Run `claude auth login`
 3. Click "Refresh Now" in the menu bar (or wait for the next automatic refresh)
 

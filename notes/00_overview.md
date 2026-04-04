@@ -8,8 +8,9 @@ Document what this repository currently is, who it serves, and how close it is t
 - [Confirmed from code] Fully refactored from single `monitor.py` into `credclaude/` Python package with tests, packaging, and a built `.app` bundle.
 
 ## Confirmed from code
-- The app is a Python `rumps` menu bar app built as a proper package (`credclaude/`) with modules for ingestion, billing, cost computation, notifications, and limit providers.
-- Primary data path: OAuth API (`https://api.anthropic.com/api/oauth/usage`) for live 5-hour session utilization; JSONL file scanning for daily/billing-period USD cost.
+- The app is a Python `rumps` menu bar app built as a proper package (`credclaude/`) with modules for ingestion, billing, cost computation, notifications, limit providers, auth launching, icon asset resolution, and time formatting.
+- App does not appear in the Dock or CMD+Tab switcher — `NSApplicationActivationPolicyAccessory` is set at startup (`credclaude/app.py`).
+- Primary data path: OAuth API (`https://api.anthropic.com/api/oauth/usage`) for live 5-hour session utilization, weekly utilization, and extra usage; JSONL file scanning for daily/billing-period USD cost.
 - First-run setup prompts for billing reset day and daily budget (`credclaude/config.py`).
 - macOS notifications for billing reset and budget threshold via `osascript` (`credclaude/notifications.py`).
 - `install.sh` builds a `.app` bundle via `build_app.sh`, copies it to `~/Applications`, and registers a `launchd` login item that runs `open -a CredClaude`.
@@ -23,7 +24,7 @@ Document what this repository currently is, who it serves, and how close it is t
 ## Important details
 - Core journey: install → `.app` auto-starts via launchd → first-run prompts → passive monitoring in menu bar → OAuth data for session limits + JSONL data for spend → optional settings updates.
 - Cost model uses an externalized `~/.credclaude/pricing.json` (shipped from `default_pricing.json`). Staleness is checked at startup — warns if >30 days old.
-- Config at `~/.credclaude/config.json`. Keys: `billing_day`, `daily_budget_usd`, `warn_at_pct`, `notifications_enabled`, `plan_tier`.
+- Config at `~/.credclaude/config.json`. Keys: `billing_day`, `daily_budget_usd`, `warn_at_pct`, `notifications_enabled`, `plan_tier`, `auto_reauth_enabled` (bool, default `true`), `auto_reauth_cooldown_sec` (int, default 1800).
 - Limit data degrades gracefully: OAuth API → stale cache → disk snapshot (`snapshot.json`) → plan-tier estimator → offline state.
 
 ## Open issues / gaps

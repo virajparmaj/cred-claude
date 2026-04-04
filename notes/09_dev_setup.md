@@ -13,7 +13,7 @@ Provide practical setup/run instructions for contributors.
 - **Entry point**: `python -m credclaude` (via `credclaude/__main__.py`).
 - **Install script**: `install.sh` — creates venv, `pip install -e .`, builds `.app` via `build_app.sh`, copies to `~/Applications`, registers launchd.
 - **Uninstall script**: `uninstall.sh` — unloads/removes launch agent plist, optionally removes `.app`.
-- **Tests**: `tests/` directory with 5 test modules (~200 test cases) covering billing, config, cost_engine, ingestion, limit_providers. Run with `pytest`.
+- **Tests**: `tests/` directory with 10 test modules covering billing, config, cost_engine, formatting, ingestion, limit_providers, app, auth_launcher, icon_assets, and conftest. Run with `pytest`.
 - Local data at `~/.credclaude/`. Claude logs expected at `~/.claude/projects/`.
 
 ## Dev run commands
