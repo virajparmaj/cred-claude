@@ -12,7 +12,7 @@ import time
 
 import objc
 import rumps
-from AppKit import NSApplication, NSBundle, NSImage, NSObject
+from AppKit import NSApplication, NSApplicationActivationPolicyAccessory, NSBundle, NSImage, NSObject
 from Foundation import NSProcessInfo
 
 from credclaude import __version__
@@ -60,6 +60,9 @@ class _MenuDelegate(NSObject):
 
 class CredClaude(rumps.App):
     def __init__(self) -> None:
+        # Hide from Dock and app switcher — this is a menu-bar-only app
+        NSApplication.sharedApplication().setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+
         # Patch bundle name so Stage Manager/window tabs show "CredClaude" not "Python"
         _info = NSBundle.mainBundle().infoDictionary()
         if _info is not None:
