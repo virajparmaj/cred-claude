@@ -14,7 +14,7 @@ from credclaude.auth_launcher import (
 
 class TestLaunchClaudeAuthLogin:
     def test_success(self):
-        mock = MagicMock(returncode=0, stderr="", stdout="")
+        mock = MagicMock(returncode=0, stderr="", stdout="dedicated_window_existing_terminal\n")
         with patch("subprocess.run", return_value=mock) as run_mock:
             result = launch_claude_auth_login()
 
@@ -22,7 +22,13 @@ class TestLaunchClaudeAuthLogin:
         assert "Opened Terminal" in result.message
         args, kwargs = run_mock.call_args
         assert args[0][:2] == ["osascript", "-e"]
-        assert "claude auth login" in args[0][2]
+        script = args[0][2]
+        assert 'if application "Terminal" is running then' in script
+        assert 'do shell script "open -na Terminal"' in script
+        assert 'do script "claude auth login" in selected tab of front window' in script
+        assert 'else\n  tell application "Terminal"\n    do script "claude auth login"' in script
+        assert "return launch_mode" in script
+        assert 'activate\n  do script "claude auth login"' not in script
         assert kwargs["timeout"] == 12
 
     def test_permission_denied(self):

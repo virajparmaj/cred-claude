@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import subprocess
 import time
+
+logger = logging.getLogger(__name__)
 
 
 AUTH_ERROR_MARKERS = (
@@ -61,17 +64,54 @@ class ReauthGate:
         return self.seconds_until_next_attempt(now_mono=now_mono) == 0
 
 
+def _build_terminal_auth_script() -> str:
+    """Build AppleScript used to launch `claude auth login` safely.
+
+    Behavior:
+    - Terminal already running: create a dedicated window and run login there.
+    - Terminal not running: open one window and run login in it.
+    """
+    return (
+        'set launch_mode to "single_window_cold_start"\n'
+        'if application "Terminal" is running then\n'
+        '  set launch_mode to "dedicated_window_existing_terminal"\n'
+        '  do shell script "open -na Terminal"\n'
+        '  tell application "Terminal"\n'
+        "    repeat 20 times\n"
+        "      if (count of windows) > 0 then exit repeat\n"
+        "      delay 0.1\n"
+        "    end repeat\n"
+        "    if (count of windows) > 0 then\n"
+        '      do script "claude auth login" in selected tab of front window\n'
+        "    else\n"
+        '      do script "claude auth login"\n'
+        "    end if\n"
+        "    activate\n"
+        "  end tell\n"
+        "else\n"
+        '  tell application "Terminal"\n'
+        '    do script "claude auth login"\n'
+        "    activate\n"
+        "  end tell\n"
+        "end if\n"
+        "return launch_mode\n"
+    )
+
+
+def _extract_launch_mode(stdout: str | None) -> str | None:
+    """Extract launch mode marker returned by AppleScript."""
+    if not stdout:
+        return None
+    mode = stdout.strip().splitlines()[-1].strip().strip('"')
+    return mode or None
+
+
 def launch_claude_auth_login(timeout_sec: int = 12) -> LaunchResult:
     """Open Terminal and run `claude auth login`.
 
     Browser authorization still requires user action.
     """
-    script = (
-        'tell application "Terminal"\n'
-        "  activate\n"
-        '  do script "claude auth login"\n'
-        "end tell\n"
-    )
+    script = _build_terminal_auth_script()
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -96,6 +136,12 @@ def launch_claude_auth_login(timeout_sec: int = 12) -> LaunchResult:
         if detail:
             return LaunchResult(False, f"Terminal launch failed: {detail}")
         return LaunchResult(False, f"Terminal launch failed (exit {result.returncode}).")
+
+    launch_mode = _extract_launch_mode(result.stdout)
+    if launch_mode in {"dedicated_window_existing_terminal", "single_window_cold_start"}:
+        logger.info("Re-auth Terminal launch mode: %s", launch_mode)
+    elif launch_mode:
+        logger.info("Re-auth Terminal launch mode (unknown): %s", launch_mode)
 
     return LaunchResult(
         True,
