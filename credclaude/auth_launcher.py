@@ -68,30 +68,21 @@ def _build_terminal_auth_script() -> str:
     """Build AppleScript used to launch `claude auth login` safely.
 
     Behavior:
-    - Terminal already running: create a dedicated window and run login there.
-    - Terminal not running: open one window and run login in it.
+    - Terminal already running: open one new Terminal window and run login there.
+    - Terminal not running: launch Terminal and run login in its first window.
     """
     return (
-        'set launch_mode to "single_window_cold_start"\n'
+        'set launch_mode to "cold_start"\n'
         'if application "Terminal" is running then\n'
-        '  set launch_mode to "dedicated_window_existing_terminal"\n'
-        '  do shell script "open -na Terminal"\n'
+        '  set launch_mode to "existing_terminal"\n'
         '  tell application "Terminal"\n'
-        "    repeat 20 times\n"
-        "      if (count of windows) > 0 then exit repeat\n"
-        "      delay 0.1\n"
-        "    end repeat\n"
-        "    if (count of windows) > 0 then\n"
-        '      do script "claude auth login" in selected tab of front window\n'
-        "    else\n"
-        '      do script "claude auth login"\n'
-        "    end if\n"
+        '    do script "claude auth login"\n'
         "    activate\n"
         "  end tell\n"
         "else\n"
         '  tell application "Terminal"\n'
-        '    do script "claude auth login"\n'
         "    activate\n"
+        '    do script "claude auth login"\n'
         "  end tell\n"
         "end if\n"
         "return launch_mode\n"
@@ -138,7 +129,7 @@ def launch_claude_auth_login(timeout_sec: int = 12) -> LaunchResult:
         return LaunchResult(False, f"Terminal launch failed (exit {result.returncode}).")
 
     launch_mode = _extract_launch_mode(result.stdout)
-    if launch_mode in {"dedicated_window_existing_terminal", "single_window_cold_start"}:
+    if launch_mode in {"existing_terminal", "cold_start"}:
         logger.info("Re-auth Terminal launch mode: %s", launch_mode)
     elif launch_mode:
         logger.info("Re-auth Terminal launch mode (unknown): %s", launch_mode)

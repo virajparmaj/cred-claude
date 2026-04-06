@@ -46,7 +46,7 @@ _REPO_DIR = Path(__file__).parent.parent
 _INSTALL_SCRIPT = _REPO_DIR / "install.sh"
 
 _W = 500
-_H = 510
+_H = 554
 _PAD = 24
 _INNER = 18
 _ROW_H = 44
@@ -381,14 +381,25 @@ class SettingsWindow:
         box.addSubview_(src_lbl)
 
         # =================================================================
-        # MONITORING section  (label y=478, box y=378 h=132)
+        # MONITORING section  (label y=522, box y=378 h=176)
         # =================================================================
-        content.addSubview_(_section_label("Monitoring", _PAD, 478))
-        box = _section_box(378, 132)
+        content.addSubview_(_section_label("Monitoring", _PAD, 522))
+        box = _section_box(378, 176)
         content.addSubview_(box)
 
         auto_refresh_on = self._config.get("auto_refresh", True)
         auto_reauth_on = self._config.get("auto_reauth_enabled", True)
+        keepalive_on = self._config.get("keepalive_enabled", False)
+
+        # Row 4 — top: Post-reset keepalive toggle (local y=132..176)
+        box.addSubview_(_label("Post-reset keepalive", _INNER, 144))
+        self._keepalive_switch = NSSwitch.alloc().initWithFrame_(
+            NSMakeRect(box_w - _INNER - 40, 143, 40, 22)
+        )
+        self._keepalive_switch.setState_(1 if keepalive_on else 0)
+        box.addSubview_(self._keepalive_switch)
+
+        _separator(box, 132)
 
         # Row 3 — top: Auto re-authenticate toggle (local y=88..132)
         box.addSubview_(_label("Auto re-authenticate", _INNER, 100))
@@ -457,6 +468,7 @@ class SettingsWindow:
         )
 
     def _reset_to_defaults(self) -> None:
+        self._keepalive_switch.setState_(0)
         self._auto_reauth_switch.setState_(1)
         self._auto_refresh_switch.setState_(1)
         self._current_unit = "sec"
@@ -476,6 +488,7 @@ class SettingsWindow:
         # Auto refresh
         cfg["auto_refresh"] = bool(self._auto_refresh_switch.state())
         cfg["auto_reauth_enabled"] = bool(self._auto_reauth_switch.state())
+        cfg["keepalive_enabled"] = bool(self._keepalive_switch.state())
 
         # Refresh interval (clamp to valid range, convert units)
         try:

@@ -26,6 +26,7 @@ from credclaude.config import (
     load_config,
     save_config,
 )
+from credclaude.keepalive import KeepaliveScheduler
 from credclaude.limit_providers import CompositeLimitProvider
 from credclaude.models import ProviderState
 from credclaude.notifications import (
@@ -82,6 +83,7 @@ class CredClaude(rumps.App):
         NSProcessInfo.processInfo().setValue_forKey_("CredClaude", "processName")
         self.config = load_config()
         self._reauth_gate = ReauthGate(self._reauth_cooldown_sec())
+        self._keepalive_scheduler = KeepaliveScheduler()
 
         # Limit provider (Official OAuth API + Estimator fallback)
         self._provider = CompositeLimitProvider(self.config)
@@ -265,6 +267,7 @@ class CredClaude(rumps.App):
         self._last_limit = limit
         self._last_refresh_time = time.monotonic()
         self._maybe_auto_reauth(limit)
+        self._maybe_schedule_keepalive(limit)
 
     # ------------------------------------------------------------------
     # Timer callbacks
@@ -374,6 +377,12 @@ class CredClaude(rumps.App):
                 self._tick_timer.stop()
                 logger.info("Auto-refresh OFF")
 
+        last_limit = getattr(self, "_last_limit", None)
+        if not cfg.get("keepalive_enabled", False):
+            self._keepalive_scheduler.cancel()
+        elif last_limit is not None and last_limit.resets_at is not None:
+            self._keepalive_scheduler.schedule(last_limit.resets_at)
+
         logger.info("Settings applied")
 
     def _reauth_cooldown_sec(self) -> int:
@@ -393,6 +402,14 @@ class CredClaude(rumps.App):
         if not self._reauth_gate.eligible_for_auto_launch(limit.error):
             return
         self._trigger_reauth(auto=True, reason=limit.error or "auth issue")
+
+    def _maybe_schedule_keepalive(self, limit) -> None:
+        """Schedule or cancel the post-reset keepalive ping."""
+        if not self.config.get("keepalive_enabled", False):
+            self._keepalive_scheduler.cancel()
+            return
+        if limit.resets_at is not None:
+            self._keepalive_scheduler.schedule(limit.resets_at)
 
     def _trigger_reauth(self, auto: bool, reason: str) -> None:
         """Launch `claude auth login` in Terminal and surface feedback."""

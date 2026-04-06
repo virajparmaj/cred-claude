@@ -41,6 +41,7 @@ DEFAULT_CONFIG: dict = {
     "auto_refresh": True,
     "auto_reauth_enabled": True,
     "auto_reauth_cooldown_sec": 1800,
+    "keepalive_enabled": False,
 }
 
 
@@ -84,6 +85,9 @@ def load_config() -> dict:
             if not isinstance(cfg.get("auto_reauth_enabled"), bool):
                 logger.warning("Invalid auto_reauth_enabled type, resetting to default")
                 cfg["auto_reauth_enabled"] = DEFAULT_CONFIG["auto_reauth_enabled"]
+            if not isinstance(cfg.get("keepalive_enabled"), bool):
+                logger.warning("Invalid keepalive_enabled type, resetting to default")
+                cfg["keepalive_enabled"] = DEFAULT_CONFIG["keepalive_enabled"]
             cooldown = cfg.get("auto_reauth_cooldown_sec")
             if not isinstance(cooldown, (int, float)) or cooldown < 30 or cooldown > 86400:
                 logger.warning("Invalid auto_reauth_cooldown_sec '%s', resetting to default",

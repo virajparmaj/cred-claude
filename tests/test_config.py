@@ -28,6 +28,7 @@ class TestLoadConfig:
         assert cfg["plan_tier"] == "pro"
         assert cfg["auto_reauth_enabled"] is True
         assert cfg["auto_reauth_cooldown_sec"] == 1800
+        assert cfg["keepalive_enabled"] is False
 
     def test_reads_existing_config(self, config_env):
         config_env.write_text(json.dumps({"billing_day": 15, "plan_tier": "max_5x"}))
@@ -43,6 +44,7 @@ class TestLoadConfig:
         assert "plan_tier" in cfg
         assert "auto_reauth_enabled" in cfg
         assert "auto_reauth_cooldown_sec" in cfg
+        assert "keepalive_enabled" in cfg
 
     def test_migrates_daily_message_limit(self, config_env):
         config_env.write_text(json.dumps({
@@ -66,6 +68,13 @@ class TestLoadConfig:
         cfg = load_config()
         assert cfg["auto_reauth_enabled"] is True
         assert cfg["auto_reauth_cooldown_sec"] == 1800
+
+    def test_invalid_keepalive_type_resets_to_default(self, config_env):
+        config_env.write_text(json.dumps({
+            "keepalive_enabled": "sometimes",
+        }))
+        cfg = load_config()
+        assert cfg["keepalive_enabled"] is False
 
 
 class TestSaveConfig:
