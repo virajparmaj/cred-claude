@@ -9,3 +9,58 @@ build/
 .eggs/
 # Local staging folder; the tracked production icon sources live in assets/icons/macos/.
 MacOS icons
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+.envrc
+
+# Private certificates and keys
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.mobileprovision
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS extras
+._*
+.Spotlight-V100
+.Trashes
+
+# macOS app bundle build artifacts
+*.icns
+*.iconset/
+
+# Xcode / macOS developer artifacts
+DerivedData/
+xcuserdata/
+
+# Local Claude Code config
+.claude/
+
+# Python editable install artifacts
+__editable__*.pth
+__editable__*.py
